@@ -1,0 +1,47 @@
+version: "3.9"
+
+networks:
+  apm:
+    driver: bridge
+
+volumes:
+  pg-data:
+  kafka-data:
+
+services:
+
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: ${POSTGRES_CONTAINER_NAME:-apm-postgres}
+    networks:
+      - apm
+    ports:
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    env_file:
+      - .env.docker
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-apm_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-apm_password}
+      POSTGRES_DB: ${POSTGRES_DB:-apm_db}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-apm_user} -d ${POSTGRES_DB:-apm_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: ${REDIS_CONTAINER_NAME:-apm-redis}
+    networks:
+      - apm
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    env_file:
+      - .env.docker
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5

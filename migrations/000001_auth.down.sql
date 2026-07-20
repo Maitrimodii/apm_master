@@ -1,0 +1,13 @@
+DROP TABLE IF EXISTS password_reset_tokens;
+DROP TABLE IF EXISTS refresh_tokens;
+DROP TABLE IF EXISTS api_keys;
+DROP TABLE IF EXISTS user_roles;
+DROP TABLE IF EXISTS role_permissions;
+DROP TABLE IF EXISTS permissions;
+DROP TYPE IF EXISTS permission_action;
+DROP TABLE IF EXISTS invite_roles;
+DROP TABLE IF EXISTS invites;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS roles;
+DROP TABLE IF EXISTS orgs;
+DROP EXTENSION IF EXISTS "pgcrypto";
