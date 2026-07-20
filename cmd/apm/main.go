@@ -11,13 +11,18 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Maitrimodii/apm_master/internal/alert"
 	"github.com/Maitrimodii/apm_master/internal/auth"
 	"github.com/Maitrimodii/apm_master/internal/config"
 	"github.com/Maitrimodii/apm_master/internal/database"
+	"github.com/Maitrimodii/apm_master/internal/ingest"
+	"github.com/Maitrimodii/apm_master/internal/log"
 	applogger "github.com/Maitrimodii/apm_master/internal/logger"
+	"github.com/Maitrimodii/apm_master/internal/metric"
 	"github.com/Maitrimodii/apm_master/internal/notification"
 	"github.com/Maitrimodii/apm_master/internal/server"
 	"github.com/Maitrimodii/apm_master/internal/server/middleware"
+	"github.com/Maitrimodii/apm_master/internal/trace"
 
 	"github.com/gin-gonic/gin"
 )
@@ -89,9 +94,37 @@ func run() error {
 		logger,
 	)
 
+	ingestModule, err := ingest.NewModule(
+		appCtx,
+		databaseInstance.Pool(),
+		cfg,
+		identityModule.APIKeyValidator,
+		logger,
+	)
+	if err != nil {
+		return fmt.Errorf("create ingest module: %w", err)
+	}
+
+	moduleDeps := middleware.CommonModuleDeps{
+		DB:                databaseInstance.Pool(),
+		PermissionChecker: identityModule.PermissionChecker,
+		TokenParser:       identityModule.TokenParser,
+		Logger:            logger,
+	}
+
 	apiHandler := server.NewAPIHandler(
 		[]server.RouteRegistrar{
 			identityModule,
+			ingestModule,
+			trace.NewModule(moduleDeps),
+			log.NewModule(moduleDeps),
+			metric.NewModule(moduleDeps),
+			alert.NewModule(
+				moduleDeps,
+				notificationService,
+				cfg,
+				appCtx,
+			),
 		},
 	)
 
@@ -135,6 +168,13 @@ func run() error {
 		shutdownErrs = append(shutdownErrs, fmt.Errorf("server shutdown: %w", err))
 	}
 	srvCancel()
+
+	ingestCtx, ingestCancel := context.WithTimeout(appCtx, shutdownTimeout)
+	if err := ingestModule.Shutdown(ingestCtx); err != nil {
+		logger.Error("ingest shutdown failed", slog.Any("error", err))
+		shutdownErrs = append(shutdownErrs, fmt.Errorf("ingest shutdown: %w", err))
+	}
+	ingestCancel()
 
 	appCancel()
 

@@ -43,8 +43,36 @@ const (
 	envSMTPUsername = "SMTP_USERNAME"
 	envSMTPPassword = "SMTP_PASSWORD"
 
-	envRateLimitLimit = "RATE_LIMIT_LIMIT"
-	envRateLimitBurst = "RATE_LIMIT_BURST"
+	envKafkaBrokers                = "KAFKA_BROKERS"
+	envKafkaClientID               = "KAFKA_CLIENT_ID"
+	envKafkaConsumerGroup          = "KAFKA_CONSUMER_GROUP"
+	envKafkaTracesTopic            = "KAFKA_TRACES_TOPIC"
+	envKafkaLogsTopic              = "KAFKA_LOGS_TOPIC"
+	envKafkaMetricsTopic           = "KAFKA_METRICS_TOPIC"
+	envKafkaTracesDLQTopic         = "KAFKA_TRACES_DLQ_TOPIC"
+	envKafkaLogsDLQTopic           = "KAFKA_LOGS_DLQ_TOPIC"
+	envKafkaMetricsDLQTopic        = "KAFKA_METRICS_DLQ_TOPIC"
+	envKafkaTopicPartitions        = "KAFKA_TOPIC_PARTITIONS"
+	envKafkaTopicReplicationFactor = "KAFKA_TOPIC_REPLICATION_FACTOR"
+	envKafkaTopicRetention         = "KAFKA_TOPIC_RETENTION_MS"
+	envKafkaCompression            = "KAFKA_COMPRESSION"
+	envKafkaProducerBatchSize      = "KAFKA_PRODUCER_BATCH_SIZE"
+	envKafkaProducerBatchBytes     = "KAFKA_PRODUCER_BATCH_BYTES"
+	envKafkaProducerBatchTimeout   = "KAFKA_PRODUCER_BATCH_TIMEOUT_MS"
+	envKafkaProducerWriteTimeout   = "KAFKA_PRODUCER_WRITE_TIMEOUT_MS"
+	envKafkaProducerRequiredAcks   = "KAFKA_PRODUCER_REQUIRED_ACKS"
+	envKafkaProducerMaxAttempts    = "KAFKA_PRODUCER_MAX_ATTEMPTS"
+	envKafkaConsumerWorkers        = "KAFKA_CONSUMER_WORKERS"
+	envKafkaConsumerBatchRecords   = "KAFKA_CONSUMER_BATCH_RECORDS"
+	envKafkaConsumerBatchBytes     = "KAFKA_CONSUMER_BATCH_BYTES"
+	envKafkaConsumerFlushInterval  = "KAFKA_CONSUMER_FLUSH_INTERVAL_MS"
+	envKafkaConsumerReadMaxBytes   = "KAFKA_CONSUMER_READ_MAX_BYTES"
+	envKafkaConsumerMaxAttempts    = "KAFKA_CONSUMER_MAX_ATTEMPTS"
+	envKafkaConsumerRetryInitial   = "KAFKA_CONSUMER_RETRY_INITIAL_MS"
+	envKafkaConsumerRetryMax       = "KAFKA_CONSUMER_RETRY_MAX_MS"
+	envAlertEvaluationInterval     = "ALERT_EVALUATION_INTERVAL_MS"
+	envRateLimitLimit              = "RATE_LIMIT_LIMIT"
+	envRateLimitBurst              = "RATE_LIMIT_BURST"
 
 	defaultAppURL   = "http://localhost:3000"
 	defaultAppEnv   = "development"
@@ -72,13 +100,42 @@ const (
 	defaultInviteExpiryDays        = 10
 	defaultPasswordResetExpiryMins = 30
 
-	defaultEmailFrom      = "no-reply@apm-master.local"
-	defaultSMTPHost       = ""
-	defaultSMTPPort       = "587"
-	defaultSMTPUsername   = ""
-	defaultSMTPPassword   = ""
-	defaultRateLimitLimit = 100.0
-	defaultRateLimitBurst = 200
+	defaultEmailFrom    = "no-reply@apm-master.local"
+	defaultSMTPHost     = ""
+	defaultSMTPPort     = "587"
+	defaultSMTPUsername = ""
+	defaultSMTPPassword = ""
+
+	defaultKafkaBrokers                 = "localhost:9092"
+	defaultKafkaClientID                = "apm-master-ingest"
+	defaultKafkaConsumerGroup           = "apm-master-ingest-writers"
+	defaultKafkaTracesTopic             = "apm.telemetry.trace.v1"
+	defaultKafkaLogsTopic               = "apm.telemetry.log.v1"
+	defaultKafkaMetricsTopic            = "apm.telemetry.metric.v1"
+	defaultKafkaTracesDLQTopic          = "apm.telemetry.trace.dlq.v1"
+	defaultKafkaLogsDLQTopic            = "apm.telemetry.log.dlq.v1"
+	defaultKafkaMetricsDLQTopic         = "apm.telemetry.metric.dlq.v1"
+	defaultKafkaTopicPartitions         = 12
+	defaultKafkaTopicReplicationFactor  = 1
+	defaultKafkaTopicRetentionMS        = 604800000
+	defaultKafkaCompression             = "lz4"
+	defaultKafkaProducerBatchSize       = 1000
+	defaultKafkaProducerBatchBytes      = 1048576
+	defaultKafkaProducerBatchTimeoutMS  = 10
+	defaultKafkaProducerWriteTimeoutMS  = 10000
+	defaultKafkaProducerRequiredAcks    = -1
+	defaultKafkaProducerMaxAttempts     = 10
+	defaultKafkaConsumerWorkers         = 3
+	defaultKafkaConsumerBatchRecords    = 1000
+	defaultKafkaConsumerBatchBytes      = 4194304
+	defaultKafkaConsumerFlushIntervalMS = 1000
+	defaultKafkaConsumerReadMaxBytes    = 10485760
+	defaultKafkaConsumerMaxAttempts     = 5
+	defaultKafkaConsumerRetryInitialMS  = 250
+	defaultKafkaConsumerRetryMaxMS      = 5000
+	defaultAlertEvaluationIntervalMS    = 60000
+	defaultRateLimitLimit               = 100.0
+	defaultRateLimitBurst               = 200
 )
 
 // Config holds all configuration values for the application.
@@ -121,8 +178,36 @@ type Config struct {
 	SMTPUsername string
 	SMTPPassword string
 
-	RateLimitLimit float64
-	RateLimitBurst int
+	KafkaBrokers                string
+	KafkaClientID               string
+	KafkaConsumerGroup          string
+	KafkaTracesTopic            string
+	KafkaLogsTopic              string
+	KafkaMetricsTopic           string
+	KafkaTracesDLQTopic         string
+	KafkaLogsDLQTopic           string
+	KafkaMetricsDLQTopic        string
+	KafkaTopicPartitions        int
+	KafkaTopicReplicationFactor int
+	KafkaTopicRetention         time.Duration
+	KafkaCompression            string
+	KafkaProducerBatchSize      int
+	KafkaProducerBatchBytes     int
+	KafkaProducerBatchTimeout   time.Duration
+	KafkaProducerWriteTimeout   time.Duration
+	KafkaProducerRequiredAcks   int
+	KafkaProducerMaxAttempts    int
+	KafkaConsumerWorkers        int
+	KafkaConsumerBatchRecords   int
+	KafkaConsumerBatchBytes     int
+	KafkaConsumerFlushInterval  time.Duration
+	KafkaConsumerReadMaxBytes   int
+	KafkaConsumerMaxAttempts    int
+	KafkaConsumerRetryInitial   time.Duration
+	KafkaConsumerRetryMax       time.Duration
+	AlertEvaluationInterval     time.Duration
+	RateLimitLimit              float64
+	RateLimitBurst              int
 }
 
 func loadEnvFile() (err error) {
@@ -213,8 +298,36 @@ func Load() (*Config, error) {
 		SMTPUsername: getEnv(envSMTPUsername, defaultSMTPUsername),
 		SMTPPassword: getEnv(envSMTPPassword, defaultSMTPPassword),
 
-		RateLimitLimit: getEnvFloat(envRateLimitLimit, defaultRateLimitLimit),
-		RateLimitBurst: getEnvInt(envRateLimitBurst, defaultRateLimitBurst),
+		KafkaBrokers:                getEnv(envKafkaBrokers, defaultKafkaBrokers),
+		KafkaClientID:               getEnv(envKafkaClientID, defaultKafkaClientID),
+		KafkaConsumerGroup:          getEnv(envKafkaConsumerGroup, defaultKafkaConsumerGroup),
+		KafkaTracesTopic:            getEnv(envKafkaTracesTopic, defaultKafkaTracesTopic),
+		KafkaLogsTopic:              getEnv(envKafkaLogsTopic, defaultKafkaLogsTopic),
+		KafkaMetricsTopic:           getEnv(envKafkaMetricsTopic, defaultKafkaMetricsTopic),
+		KafkaTracesDLQTopic:         getEnv(envKafkaTracesDLQTopic, defaultKafkaTracesDLQTopic),
+		KafkaLogsDLQTopic:           getEnv(envKafkaLogsDLQTopic, defaultKafkaLogsDLQTopic),
+		KafkaMetricsDLQTopic:        getEnv(envKafkaMetricsDLQTopic, defaultKafkaMetricsDLQTopic),
+		KafkaTopicPartitions:        getEnvInt(envKafkaTopicPartitions, defaultKafkaTopicPartitions),
+		KafkaTopicReplicationFactor: getEnvInt(envKafkaTopicReplicationFactor, defaultKafkaTopicReplicationFactor),
+		KafkaTopicRetention:         getEnvDurationMS(envKafkaTopicRetention, defaultKafkaTopicRetentionMS),
+		KafkaCompression:            getEnv(envKafkaCompression, defaultKafkaCompression),
+		KafkaProducerBatchSize:      getEnvInt(envKafkaProducerBatchSize, defaultKafkaProducerBatchSize),
+		KafkaProducerBatchBytes:     getEnvInt(envKafkaProducerBatchBytes, defaultKafkaProducerBatchBytes),
+		KafkaProducerBatchTimeout:   getEnvDurationMS(envKafkaProducerBatchTimeout, defaultKafkaProducerBatchTimeoutMS),
+		KafkaProducerWriteTimeout:   getEnvDurationMS(envKafkaProducerWriteTimeout, defaultKafkaProducerWriteTimeoutMS),
+		KafkaProducerRequiredAcks:   getEnvInt(envKafkaProducerRequiredAcks, defaultKafkaProducerRequiredAcks),
+		KafkaProducerMaxAttempts:    getEnvInt(envKafkaProducerMaxAttempts, defaultKafkaProducerMaxAttempts),
+		KafkaConsumerWorkers:        getEnvInt(envKafkaConsumerWorkers, defaultKafkaConsumerWorkers),
+		KafkaConsumerBatchRecords:   getEnvInt(envKafkaConsumerBatchRecords, defaultKafkaConsumerBatchRecords),
+		KafkaConsumerBatchBytes:     getEnvInt(envKafkaConsumerBatchBytes, defaultKafkaConsumerBatchBytes),
+		KafkaConsumerFlushInterval:  getEnvDurationMS(envKafkaConsumerFlushInterval, defaultKafkaConsumerFlushIntervalMS),
+		KafkaConsumerReadMaxBytes:   getEnvInt(envKafkaConsumerReadMaxBytes, defaultKafkaConsumerReadMaxBytes),
+		KafkaConsumerMaxAttempts:    getEnvInt(envKafkaConsumerMaxAttempts, defaultKafkaConsumerMaxAttempts),
+		KafkaConsumerRetryInitial:   getEnvDurationMS(envKafkaConsumerRetryInitial, defaultKafkaConsumerRetryInitialMS),
+		KafkaConsumerRetryMax:       getEnvDurationMS(envKafkaConsumerRetryMax, defaultKafkaConsumerRetryMaxMS),
+		AlertEvaluationInterval:     getEnvDurationMS(envAlertEvaluationInterval, defaultAlertEvaluationIntervalMS),
+		RateLimitLimit:              getEnvFloat(envRateLimitLimit, defaultRateLimitLimit),
+		RateLimitBurst:              getEnvInt(envRateLimitBurst, defaultRateLimitBurst),
 	}, nil
 }
 
@@ -275,6 +388,10 @@ type validationRule struct {
 }
 
 func (config *Config) Validate() error {
+	validAcks := map[int]bool{-1: true, 0: true, 1: true}
+	validCompression := map[string]bool{
+		"lz4": true, "gzip": true, "snappy": true, "zstd": true, "none": true,
+	}
 
 	rules := []validationRule{
 		// --- Server settings ---
@@ -309,6 +426,38 @@ func (config *Config) Validate() error {
 		{config.EmailFrom != "", fmt.Errorf("EMAIL_FROM must be set")},
 		{config.SMTPHost != "", fmt.Errorf("SMTP_HOST must be set")},
 		{config.SMTPPort != "", fmt.Errorf("SMTP_PORT must be set")},
+
+		// --- Kafka settings ---
+		{config.KafkaBrokers != "", fmt.Errorf("KAFKA_BROKERS must be set")},
+		{config.KafkaClientID != "", fmt.Errorf("KAFKA_CLIENT_ID must be set")},
+		{config.KafkaConsumerGroup != "", fmt.Errorf("KAFKA_CONSUMER_GROUP must be set")},
+		{config.KafkaTracesTopic != "" && config.KafkaLogsTopic != "" && config.KafkaMetricsTopic != "",
+			fmt.Errorf("KAFKA telemetry topics must be set")},
+		{config.KafkaTracesDLQTopic != "" && config.KafkaLogsDLQTopic != "" && config.KafkaMetricsDLQTopic != "",
+			fmt.Errorf("KAFKA DLQ topics must be set")},
+		{config.KafkaTopicPartitions > 0, fmt.Errorf("KAFKA_TOPIC_PARTITIONS must be greater than 0")},
+		{config.KafkaTopicReplicationFactor > 0, fmt.Errorf("KAFKA_TOPIC_REPLICATION_FACTOR must be greater than 0")},
+		{config.KafkaTopicRetention > 0, fmt.Errorf("KAFKA_TOPIC_RETENTION_MS must be greater than 0")},
+		{config.KafkaProducerBatchSize > 0, fmt.Errorf("KAFKA_PRODUCER_BATCH_SIZE must be greater than 0")},
+		{config.KafkaProducerBatchBytes > 0, fmt.Errorf("KAFKA_PRODUCER_BATCH_BYTES must be greater than 0")},
+		{config.KafkaProducerBatchTimeout > 0, fmt.Errorf("KAFKA_PRODUCER_BATCH_TIMEOUT_MS must be greater than 0")},
+		{config.KafkaProducerWriteTimeout > 0, fmt.Errorf("KAFKA_PRODUCER_WRITE_TIMEOUT_MS must be greater than 0")},
+		{config.KafkaProducerMaxAttempts > 0, fmt.Errorf("KAFKA_PRODUCER_MAX_ATTEMPTS must be greater than 0")},
+		{validAcks[config.KafkaProducerRequiredAcks],
+			fmt.Errorf("KAFKA_PRODUCER_REQUIRED_ACKS must be -1, 0, or 1, got %d", config.KafkaProducerRequiredAcks)},
+		{validCompression[config.KafkaCompression],
+			fmt.Errorf("KAFKA_COMPRESSION must be one of lz4/gzip/snappy/zstd/none, got %q", config.KafkaCompression)},
+		{config.KafkaConsumerWorkers > 0, fmt.Errorf("KAFKA_CONSUMER_WORKERS must be greater than 0")},
+		{config.KafkaConsumerBatchRecords > 0, fmt.Errorf("KAFKA_CONSUMER_BATCH_RECORDS must be greater than 0")},
+		{config.KafkaConsumerBatchBytes > 0, fmt.Errorf("KAFKA_CONSUMER_BATCH_BYTES must be greater than 0")},
+		{config.KafkaConsumerFlushInterval > 0, fmt.Errorf("KAFKA_CONSUMER_FLUSH_INTERVAL_MS must be greater than 0")},
+		{config.KafkaConsumerReadMaxBytes > 0, fmt.Errorf("KAFKA_CONSUMER_READ_MAX_BYTES must be greater than 0")},
+		{config.KafkaConsumerMaxAttempts > 0, fmt.Errorf("KAFKA_CONSUMER_MAX_ATTEMPTS must be greater than 0")},
+		{config.KafkaConsumerRetryInitial > 0, fmt.Errorf("KAFKA_CONSUMER_RETRY_INITIAL_MS must be greater than 0")},
+		{config.KafkaConsumerRetryMax > 0, fmt.Errorf("KAFKA_CONSUMER_RETRY_MAX_MS must be greater than 0")},
+
+		// --- Alerting ---
+		{config.AlertEvaluationInterval > 0, fmt.Errorf("ALERT_EVALUATION_INTERVAL_MS must be greater than 0")},
 
 		// --- Rate Limiting ---
 		{config.RateLimitLimit > 0, fmt.Errorf("RATE_LIMIT_LIMIT must be greater than 0")},
