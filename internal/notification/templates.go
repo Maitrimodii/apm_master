@@ -257,6 +257,87 @@ const emailBaseTemplate = `
                 </div>
                 {{end}}
 
+            {{else if eq .EventType "alert_resolved"}}
+                <h1>Alert Resolved</h1>
+                <p>Great news! The alert <strong>{{.AlertName}}</strong> has returned to normal status.</p>
+                
+                <div class="details-card">
+                    <div class="details-title">Incident Summary</div>
+                    <div class="details-grid">
+                        <div class="details-row">
+                            <div class="details-label">Alert</div>
+                            <div class="details-value">{{.AlertName}}</div>
+                        </div>
+                        <div class="details-row">
+                            <div class="details-label">Status</div>
+                            <div class="details-value"><span class="badge badge-resolved">Resolved</span></div>
+                        </div>
+                        <div class="details-row">
+                            <div class="details-label">Value</div>
+                            <div class="details-value">{{.Value}}</div>
+                        </div>
+                        <div class="details-row">
+                            <div class="details-label">Threshold</div>
+                            <div class="details-value">{{.Threshold}}</div>
+                        </div>
+                    </div>
+                </div>
+
+            {{else if eq .EventType "alert_acknowledged"}}
+                <h1>Alert Acknowledged</h1>
+                <p>The firing alert <strong>{{.AlertName}}</strong> has been acknowledged and is being investigated.</p>
+                
+                <div class="details-card">
+                    <div class="details-title">Incident Details</div>
+                    <div class="details-grid">
+                        <div class="details-row">
+                            <div class="details-label">Alert</div>
+                            <div class="details-value">{{.AlertName}}</div>
+                        </div>
+                        <div class="details-row">
+                            <div class="details-label">Status</div>
+                            <div class="details-value"><span class="badge badge-acknowledged">Acknowledged</span></div>
+                        </div>
+                        <div class="details-row">
+                            <div class="details-label">Current Value</div>
+                            <div class="details-value">{{.Value}}</div>
+                        </div>
+                        <div class="details-row">
+                            <div class="details-label">Threshold</div>
+                            <div class="details-value">{{.Threshold}}</div>
+                        </div>
+                    </div>
+                </div>
+
+            {{else if eq .EventType "alert_firing"}}
+                <h1 style="color: #e11d48;">Alert Firing</h1>
+                <p>An active incident requires your attention. The alert <strong>{{.AlertName}}</strong> is currently firing.</p>
+                
+                <div class="details-card">
+                    <div class="details-title">Incident Details</div>
+                    <div class="details-grid">
+                        <div class="details-row">
+                            <div class="details-label">Alert</div>
+                            <div class="details-value"><strong>{{.AlertName}}</strong></div>
+                        </div>
+                        <div class="details-row">
+                            <div class="details-label">Severity</div>
+                            <div class="details-value"><span class="badge badge-{{html (lower .Severity)}}">{{if .Severity}}{{.Severity}}{{else}}CRITICAL{{end}}</span></div>
+                        </div>
+                        <div class="details-row">
+                            <div class="details-label">Condition</div>
+                            <div class="details-value"><code>{{.Condition}}</code></div>
+                        </div>
+                        <div class="details-row">
+                            <div class="details-label">Current Value</div>
+                            <div class="details-value" style="color: #e11d48; font-weight: 700;">{{.Value}}</div>
+                        </div>
+                        <div class="details-row">
+                            <div class="details-label">Threshold</div>
+                            <div class="details-value">{{.Threshold}}</div>
+                        </div>
+                    </div>
+                </div>
 
                 {{if .Body}}
                 <div class="message-quote">

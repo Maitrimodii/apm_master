@@ -1,0 +1,34 @@
+# Git and GitHub
+.git
+.github
+.gitignore
+
+# Ide / Editors
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Project-specific / Agents
+.agents
+.codex
+
+# Build and environment files
+.env
+.env.*
+!.env.example
+*.log
+tmp/
+dist/
+bin/
+
+# Go files / dependency files
+vendor/
+go.work
+go.work.sum
+
+# Local binary compiled output
+apm
