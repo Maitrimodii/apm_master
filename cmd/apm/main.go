@@ -20,6 +20,7 @@ import (
 	applogger "github.com/Maitrimodii/apm_master/internal/logger"
 	"github.com/Maitrimodii/apm_master/internal/metric"
 	"github.com/Maitrimodii/apm_master/internal/notification"
+	"github.com/Maitrimodii/apm_master/internal/scheduler"
 	"github.com/Maitrimodii/apm_master/internal/server"
 	"github.com/Maitrimodii/apm_master/internal/server/middleware"
 	"github.com/Maitrimodii/apm_master/internal/trace"
@@ -142,6 +143,28 @@ func run() error {
 		apiHandler,
 	)
 
+	var jobScheduler *scheduler.Scheduler
+	if cfg.AppMode == "all" || cfg.AppMode == "" {
+		jobScheduler = scheduler.New(logger)
+		
+		alertTask := alert.NewEvaluationTask(
+			alert.NewStore(databaseInstance.Pool()),
+			metric.NewStore(databaseInstance.Pool()),
+			trace.NewStore(databaseInstance.Pool()),
+			log.NewStore(databaseInstance.Pool()),
+			notificationService,
+			cfg,
+			logger,
+		)
+		
+		if err := jobScheduler.Register(alertTask); err != nil {
+			logger.Error("failed to register alert evaluation task", slog.Any("error", err))
+		} else {
+			jobScheduler.Start(appCtx)
+			logger.Info("scheduler started (AppMode: all)")
+		}
+	}
+
 	go func() {
 		logger.Info("server started", "port", cfg.HTTPPort)
 
@@ -177,6 +200,10 @@ func run() error {
 	ingestCancel()
 
 	appCancel()
+	
+	if jobScheduler != nil {
+		jobScheduler.Stop()
+	}
 
 	notifyCtx, notifyCancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	select {

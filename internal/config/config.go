@@ -13,6 +13,7 @@ import (
 const (
 	envAppURL   = "APPURL"
 	envAppEnv   = "APP_ENV"
+	envAppMode  = "APP_MODE"
 	envLogLevel = "LOG_LEVEL"
 
 	envHTTPPort          = "HTTP_PORT"
@@ -76,6 +77,7 @@ const (
 
 	defaultAppURL   = "http://localhost:3000"
 	defaultAppEnv   = "development"
+	defaultAppMode  = "all"
 	defaultLogLevel = "info"
 
 	defaultHTTPPort            = "8080"
@@ -142,6 +144,7 @@ const (
 type Config struct {
 	AppUrl   string
 	AppEnv   string
+	AppMode  string
 	LogLevel string
 
 	// Server settings
@@ -268,6 +271,7 @@ func Load() (*Config, error) {
 	return &Config{
 		AppUrl:   getEnv(envAppURL, defaultAppURL),
 		AppEnv:   getEnv(envAppEnv, defaultAppEnv),
+		AppMode:  getEnv(envAppMode, defaultAppMode),
 		LogLevel: getEnv(envLogLevel, defaultLogLevel),
 
 		HTTPPort:          getEnv(envHTTPPort, defaultHTTPPort),
@@ -462,6 +466,41 @@ func (config *Config) Validate() error {
 		// --- Rate Limiting ---
 		{config.RateLimitLimit > 0, fmt.Errorf("RATE_LIMIT_LIMIT must be greater than 0")},
 		{config.RateLimitBurst > 0, fmt.Errorf("RATE_LIMIT_BURST must be greater than 0")},
+	}
+
+	var errs []error
+	for _, r := range rules {
+		if !r.ok {
+			errs = append(errs, r.err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (config *Config) ValidateScheduler() error {
+	rules := []validationRule{
+		// --- Server settings ---
+		{config.AppEnv != "", fmt.Errorf("APP_ENV must be set")},
+		{config.LogLevel != "", fmt.Errorf("LOG_LEVEL must be set")},
+		{config.AppMode == "scheduler" || config.AppMode == "all", fmt.Errorf("APP_MODE must be scheduler or all")},
+
+		// --- Database settings ---
+		{config.PostgresHost != "", fmt.Errorf("POSTGRES_HOST must be set")},
+		{config.RedisURL != "", fmt.Errorf("REDIS_URL must be set")},
+		{config.PostgresPort != "", fmt.Errorf("POSTGRES_PORT must be set")},
+		{config.PostgresUser != "", fmt.Errorf("POSTGRES_USER must be set")},
+		{config.PostgresDBName != "", fmt.Errorf("POSTGRES_DB must be set")},
+		{config.PostgresTimeout > 0, fmt.Errorf("POSTGRES_TIMEOUT_MS must be greater than 0")},
+		{config.RedisTimeout > 0, fmt.Errorf("REDIS_TIMEOUT_MS must be greater than 0")},
+		{config.PostgresPassword != "", fmt.Errorf("POSTGRES_PASSWORD must be set")},
+
+		// --- Email settings ---
+		{config.EmailFrom != "", fmt.Errorf("EMAIL_FROM must be set")},
+		{config.SMTPHost != "", fmt.Errorf("SMTP_HOST must be set")},
+		{config.SMTPPort != "", fmt.Errorf("SMTP_PORT must be set")},
+
+		// --- Alerting ---
+		{config.AlertEvaluationInterval > 0, fmt.Errorf("ALERT_EVALUATION_INTERVAL_MS must be greater than 0")},
 	}
 
 	var errs []error

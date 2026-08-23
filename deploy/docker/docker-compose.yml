@@ -74,3 +74,41 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  apm-api:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: apm-api
+    command: ["./apm"]
+    environment:
+      APP_MODE: "api"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    env_file:
+      - .env.docker
+    networks:
+      - apm
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+
+  apm-scheduler:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: apm-scheduler
+    command: ["./scheduler"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env.docker
+    networks:
+      - apm

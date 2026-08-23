@@ -514,21 +514,23 @@ func splitLogicalOperator(expr string, op string) []string {
 	lowerOpToken := strings.ToLower(opToken)
 
 	start := 0
+	searchStart := 0
 	for {
-		idx := strings.Index(lowerExpr[start:], lowerOpToken)
+		idx := strings.Index(lowerExpr[searchStart:], lowerOpToken)
 		if idx == -1 {
 			parts = append(parts, strings.TrimSpace(expr[start:]))
 			break
 		}
 
-		matchIdx := start + idx
+		matchIdx := searchStart + idx
 		if isInsideBracesOrQuotes(expr, matchIdx) {
-			start = matchIdx + 1
+			searchStart = matchIdx + 1
 			continue
 		}
 
 		parts = append(parts, strings.TrimSpace(expr[start:matchIdx]))
 		start = matchIdx + len(opToken)
+		searchStart = start
 	}
 
 	return parts
