@@ -20,6 +20,7 @@ import (
 	applogger "github.com/Maitrimodii/apm_master/internal/logger"
 	"github.com/Maitrimodii/apm_master/internal/metric"
 	"github.com/Maitrimodii/apm_master/internal/notification"
+	"github.com/Maitrimodii/apm_master/internal/retention"
 	"github.com/Maitrimodii/apm_master/internal/scheduler"
 	"github.com/Maitrimodii/apm_master/internal/server"
 	"github.com/Maitrimodii/apm_master/internal/server/middleware"
@@ -123,8 +124,6 @@ func run() error {
 			alert.NewModule(
 				moduleDeps,
 				notificationService,
-				cfg,
-				appCtx,
 			),
 		},
 	)
@@ -134,13 +133,16 @@ func run() error {
 		middleware.Logger(logger),
 		middleware.Recovery(logger),
 		middleware.BodyLimit(cfg.MaxBodyBytes),
-		middleware.NewRateLimiter(redisClient.Client, cfg.RateLimitLimit, cfg.RateLimitBurst).Limit(),
+		middleware.NewRateLimiter(redisClient.Client, cfg.RateLimitLimit, cfg.RateLimitBurst, cfg.RateLimitWindow).Limit(),
 	}
+
+	healthChecker := server.NewHealthChecker(databaseInstance.Pool(), redisClient.Client)
 
 	srv := server.NewServer(
 		cfg,
 		middlewares,
 		apiHandler,
+		healthChecker,
 	)
 
 	var jobScheduler *scheduler.Scheduler
@@ -157,12 +159,18 @@ func run() error {
 			logger,
 		)
 		
+		retentionStore := retention.NewStore(databaseInstance.Pool())
+		retentionTask := retention.NewTask(retentionStore, cfg, logger)
+		
 		if err := jobScheduler.Register(alertTask); err != nil {
 			logger.Error("failed to register alert evaluation task", slog.Any("error", err))
-		} else {
-			jobScheduler.Start(appCtx)
-			logger.Info("scheduler started (AppMode: all)")
 		}
+		if err := jobScheduler.Register(retentionTask); err != nil {
+			logger.Error("failed to register retention task", slog.Any("error", err))
+		}
+		
+		jobScheduler.Start(appCtx)
+		logger.Info("scheduler started (AppMode: all)")
 	}
 
 	go func() {

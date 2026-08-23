@@ -3,93 +3,105 @@ package auth_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
-	"os"
 	"testing"
-	"time"
+
+	"github.com/Maitrimodii/apm_master/test/e2e/framework"
+	"github.com/google/uuid"
 )
 
-func getBaseURL() string {
-	url := os.Getenv("APM_E2E_URL")
-	if url == "" {
-		url = "http://localhost:8080"
-	}
-	return url
-}
-
 func TestAuthFlow(t *testing.T) {
-	baseURL := getBaseURL()
-	client := &http.Client{Timeout: 5 * time.Second}
+	// 1. Success cases are covered implicitly by SetupOrgAndUser, but let's test the negative/edge cases explicitly.
+	ctx := framework.SetupOrgAndUser(t)
 
-	// 1. Register User
-	registerPayload := map[string]string{
-		"org_name":   "E2E Org",
-		"org_slug":   "e2e-org-" + time.Now().Format("20060102150405"),
-		"first_name": "E2E",
-		"last_name":  "User",
-		"email":      "user-" + time.Now().Format("20060102150405") + "@example.com",
-		"password":   "StrongPass123!",
-	}
-	registerBody, _ := json.Marshal(registerPayload)
-	req, _ := http.NewRequest("POST", baseURL+"/api/v1/auth/register", bytes.NewBuffer(registerBody))
-	req.Header.Set("Content-Type", "application/json")
-	
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("Failed to call register: %v", err)
-	}
-	defer resp.Body.Close()
-	
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected 200/201 on register, got %d", resp.StatusCode)
-	}
+	t.Run("Register With Existing Email", func(t *testing.T) {
+		registerPayload := map[string]string{
+			"org_name":   "Another Org",
+			"org_slug":   "another-org-" + uuid.New().String()[:8],
+			"first_name": "Test",
+			"last_name":  "User",
+			"email":      ctx.UserEmail, // Re-use the existing email
+			"password":   "StrongPass123!",
+		}
+		body, _ := json.Marshal(registerPayload)
+		req, _ := http.NewRequest("POST", ctx.BaseURL+"/api/v1/auth/register", bytes.NewBuffer(body))
+		req.Header.Set("Content-Type", "application/json")
+		
+		resp, err := ctx.HTTPClient.Do(req)
+		if err != nil {
+			t.Fatalf("Failed to call register: %v", err)
+		}
+		defer resp.Body.Close()
+		
+		if resp.StatusCode != http.StatusConflict && resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("Expected 409/400 on register with existing email, got %d", resp.StatusCode)
+		}
+	})
 
-	// 2. Login User
-	loginPayload := map[string]string{
-		"org_slug": registerPayload["org_slug"],
-		"email":    registerPayload["email"],
-		"password": registerPayload["password"],
-	}
-	loginBody, _ := json.Marshal(loginPayload)
-	req, _ = http.NewRequest("POST", baseURL+"/api/v1/auth/login", bytes.NewBuffer(loginBody))
-	req.Header.Set("Content-Type", "application/json")
-	
-	resp, err = client.Do(req)
-	if err != nil {
-		t.Fatalf("Failed to call login: %v", err)
-	}
-	defer resp.Body.Close()
+	t.Run("Register With Weak Password", func(t *testing.T) {
+		runID := uuid.New().String()[:8]
+		registerPayload := map[string]string{
+			"org_name":   "Weak Pass Org",
+			"org_slug":   "weak-org-" + runID,
+			"first_name": "Test",
+			"last_name":  "User",
+			"email":      fmt.Sprintf("weak-%s@example.com", runID),
+			"password":   "123", // Weak password
+		}
+		body, _ := json.Marshal(registerPayload)
+		req, _ := http.NewRequest("POST", ctx.BaseURL+"/api/v1/auth/register", bytes.NewBuffer(body))
+		req.Header.Set("Content-Type", "application/json")
+		
+		resp, err := ctx.HTTPClient.Do(req)
+		if err != nil {
+			t.Fatalf("Failed to call register: %v", err)
+		}
+		defer resp.Body.Close()
+		
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("Expected 400 on register with weak password, got %d", resp.StatusCode)
+		}
+	})
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("Expected 200 on login, got %d", resp.StatusCode)
-	}
+	t.Run("Login With Incorrect Password", func(t *testing.T) {
+		loginPayload := map[string]string{
+			"org_slug": ctx.OrgSlug,
+			"email":    ctx.UserEmail,
+			"password": "WrongPassword!123",
+		}
+		body, _ := json.Marshal(loginPayload)
+		req, _ := http.NewRequest("POST", ctx.BaseURL+"/api/v1/auth/login", bytes.NewBuffer(body))
+		req.Header.Set("Content-Type", "application/json")
+		
+		resp, err := ctx.HTTPClient.Do(req)
+		if err != nil {
+			t.Fatalf("Failed to call login: %v", err)
+		}
+		defer resp.Body.Close()
 
-	var loginResp struct {
-		AccessToken string `json:"access_token"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&loginResp); err != nil {
-		t.Fatalf("Failed to decode login response: %v", err)
-	}
-	if loginResp.AccessToken == "" {
-		t.Fatalf("Expected access token in login response")
-	}
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("Expected 401 on login with incorrect password, got %d", resp.StatusCode)
+		}
+	})
 
-	// 3. Create API Key
-	apiKeyPayload := map[string]string{
-		"name": "e2e-api-key",
-	}
-	apiKeyBody, _ := json.Marshal(apiKeyPayload)
-	req, _ = http.NewRequest("POST", baseURL+"/api/v1/auth/api-keys", bytes.NewBuffer(apiKeyBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+loginResp.AccessToken)
+	t.Run("Create API Key With Invalid Token", func(t *testing.T) {
+		apiKeyPayload := map[string]string{
+			"name": "invalid-token-key",
+		}
+		body, _ := json.Marshal(apiKeyPayload)
+		req, _ := http.NewRequest("POST", ctx.BaseURL+"/api/v1/auth/api-keys", bytes.NewBuffer(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer invalid.jwt.token")
 
-	resp, err = client.Do(req)
-	if err != nil {
-		t.Fatalf("Failed to call create api key: %v", err)
-	}
-	defer resp.Body.Close()
+		resp, err := ctx.HTTPClient.Do(req)
+		if err != nil {
+			t.Fatalf("Failed to call create api key: %v", err)
+		}
+		defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		t.Errorf("Expected 200/201 on api key creation, got %d", resp.StatusCode)
-	}
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("Expected 401 on api key creation with invalid token, got %d", resp.StatusCode)
+		}
+	})
 }

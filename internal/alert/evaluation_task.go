@@ -17,10 +17,10 @@ import (
 // EvaluationTask evaluates enabled alerts on a fixed cadence.
 // It implements the scheduler.Task interface.
 type EvaluationTask struct {
-	store           *Store
-	metricsStore    *metric.Store
-	tracesStore     *trace.Store
-	logsStore       *log.Store
+	store           AlertStoreInterface
+	metricsStore    metric.MetricStoreInterface
+	tracesStore     trace.TraceStoreInterface
+	logsStore       log.LogStoreInterface
 	notification    *notification.Service
 	log             *slog.Logger
 	interval        time.Duration
@@ -29,10 +29,10 @@ type EvaluationTask struct {
 
 // NewEvaluationTask creates a new alert evaluation task.
 func NewEvaluationTask(
-	store *Store,
-	metricsStore *metric.Store,
-	tracesStore *trace.Store,
-	logsStore *log.Store,
+	store AlertStoreInterface,
+	metricsStore metric.MetricStoreInterface,
+	tracesStore trace.TraceStoreInterface,
+	logsStore log.LogStoreInterface,
 	notificationService *notification.Service,
 	cfg *config.Config,
 	logger *slog.Logger,
@@ -75,27 +75,37 @@ func (t *EvaluationTask) Execute(ctx context.Context) error {
 	}
 	defer t.releaseLock(ctx)
 
-	alerts, err := t.store.ListEnabled(ctx)
-	if err != nil {
-		return fmt.Errorf("list enabled alerts: %w", err)
-	}
+	limit := 500
+	offset := 0
 
-	for _, alert := range alerts {
-		if err := t.evaluateAlert(ctx, alert); err != nil {
-			t.log.Error("alert evaluation failed", "alert_id", alert.ID, "name", alert.Name, "error", err)
+	for {
+		alerts, err := t.store.ListEnabledPage(ctx, limit, offset)
+		if err != nil {
+			return fmt.Errorf("list enabled alerts page: %w", err)
 		}
+
+		for _, alert := range alerts {
+			if err := t.evaluateAlert(ctx, alert); err != nil {
+				t.log.Error("alert evaluation failed", "alert_id", alert.ID, "name", alert.Name, "error", err)
+			}
+		}
+
+		if len(alerts) < limit {
+			break
+		}
+		offset += limit
 	}
 
 	return nil
 }
 
 func (t *EvaluationTask) tryAcquireLock(ctx context.Context) bool {
-	if t.store == nil || t.store.database == nil {
+	if t.store == nil {
 		return true
 	}
 
-	var acquired bool
-	if err := t.store.database.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", t.advisoryLockKey).Scan(&acquired); err != nil {
+	acquired, err := t.store.AcquireLock(ctx, t.advisoryLockKey)
+	if err != nil {
 		t.log.Warn("advisory lock probe failed", "error", err)
 		return false
 	}
@@ -103,10 +113,10 @@ func (t *EvaluationTask) tryAcquireLock(ctx context.Context) bool {
 }
 
 func (t *EvaluationTask) releaseLock(ctx context.Context) {
-	if t.store == nil || t.store.database == nil {
+	if t.store == nil {
 		return
 	}
-	_, _ = t.store.database.Exec(ctx, "SELECT pg_advisory_unlock($1)", t.advisoryLockKey)
+	_ = t.store.ReleaseLock(ctx, t.advisoryLockKey)
 }
 
 // evaluateAlert evaluates a single alert, exporting it here for testing if needed.
@@ -137,13 +147,30 @@ func (t *EvaluationTask) fireIfNeeded(ctx context.Context, alert Alert, result *
 		return err
 	}
 
+	cond, err := parseCondition(alert.Condition)
+	if err != nil {
+		return err
+	}
+	window := cond.window
+
 	if instance == nil {
+		now := time.Now().UTC()
+		
+		state := string(AlertStatePending)
+		var pendingFiredAt *time.Time
+		if window == 0 {
+			state = string(AlertStateFiring)
+		} else {
+			pendingFiredAt = &now
+		}
+
 		instance = &AlertInstance{
 			ID:               uuid.New(),
 			AlertID:          alert.ID,
-			State:            AlertStateFiring,
-			TriggeredAt:      time.Now().UTC(),
-			LastEvaluatedAt:  time.Now().UTC(),
+			State:            state,
+			PendingFiredAt:   pendingFiredAt,
+			TriggeredAt:      now,
+			LastEvaluatedAt:  now,
 			Value:            result.Value,
 			Threshold:        result.Threshold,
 			Message:          result.Message,
@@ -152,13 +179,30 @@ func (t *EvaluationTask) fireIfNeeded(ctx context.Context, alert Alert, result *
 		if err := t.store.SaveInstance(ctx, *instance); err != nil {
 			return err
 		}
-		return t.notify(ctx, alert, instance, "alert_firing")
+		
+		if state == string(AlertStateFiring) {
+			return t.notify(ctx, alert, instance, "alert_firing")
+		}
+		return nil
 	}
 
+	now := time.Now().UTC()
 	instance.Value = result.Value
 	instance.Threshold = result.Threshold
 	instance.Message = result.Message
-	instance.LastEvaluatedAt = time.Now().UTC()
+	instance.LastEvaluatedAt = now
+
+	if instance.State == string(AlertStatePending) {
+		if instance.PendingFiredAt != nil && time.Since(*instance.PendingFiredAt) >= window {
+			instance.State = string(AlertStateFiring)
+			if err := t.store.SaveInstance(ctx, *instance); err != nil {
+				return err
+			}
+			return t.notify(ctx, alert, instance, "alert_firing")
+		}
+		return t.store.SaveInstance(ctx, *instance)
+	}
+
 	instance.NotificationSent = true
 	if err := t.store.SaveInstance(ctx, *instance); err != nil {
 		return err
@@ -171,12 +215,12 @@ func (t *EvaluationTask) resolveIfNeeded(ctx context.Context, alert Alert) error
 	if err != nil {
 		return err
 	}
-	if instance == nil || (instance.State != AlertStateFiring && instance.State != AlertStateAcknowledged) {
+	if instance == nil || (instance.State != string(AlertStateFiring) && instance.State != string(AlertStateAcknowledged)) {
 		return nil
 	}
 
 	resolvedAt := time.Now().UTC()
-	instance.State = AlertStateResolved
+	instance.State = string(AlertStateResolved)
 	instance.ResolvedAt = &resolvedAt
 	instance.LastEvaluatedAt = resolvedAt
 	instance.Message = "Alert resolved after evaluation returned to normal"

@@ -153,16 +153,18 @@ func (store *Store) Update(ctx context.Context, alert Alert) (*Alert, error) {
 	return &alert, nil
 }
 
-func (store *Store) ListEnabled(ctx context.Context) ([]Alert, error) {
+func (store *Store) ListEnabledPage(ctx context.Context, limit, offset int) ([]Alert, error) {
 	query := `
 		SELECT id, org_id, created_by, name, description, severity, condition, is_enabled, notification_roles, created_at, updated_at
 		FROM alerts
 		WHERE is_enabled = TRUE
+		ORDER BY id
+		LIMIT $1 OFFSET $2
 	`
 
-	rows, err := store.database.Query(ctx, query)
+	rows, err := store.database.Query(ctx, query, limit, offset)
 	if err != nil {
-		return nil, fmt.Errorf("list enabled alerts: %w", err)
+		return nil, fmt.Errorf("list enabled alerts page: %w", err)
 	}
 	defer rows.Close()
 
@@ -208,15 +210,15 @@ func (store *Store) ResolveUsersByRoles(ctx context.Context, orgID uuid.UUID, ro
 
 func (store *Store) GetActiveInstance(ctx context.Context, alertID uuid.UUID) (*AlertInstance, error) {
 	query := `
-		SELECT id, alert_id, state, triggered_at, acknowledged_at, resolved_at, last_evaluated_at, value, threshold, message, notification_sent, created_at, updated_at
+		SELECT id, alert_id, state, pending_fired_at, triggered_at, acknowledged_at, resolved_at, last_evaluated_at, value, threshold, message, notification_sent, created_at, updated_at
 		FROM alert_instances
-		WHERE alert_id = $1 AND state IN ('FIRING','ACKNOWLEDGED')
+		WHERE alert_id = $1 AND state IN ('PENDING', 'FIRING','ACKNOWLEDGED')
 		ORDER BY triggered_at DESC
 		LIMIT 1
 	`
 
 	var instance AlertInstance
-	err := store.database.QueryRow(ctx, query, alertID).Scan(&instance.ID, &instance.AlertID, &instance.State, &instance.TriggeredAt, &instance.AcknowledgedAt, &instance.ResolvedAt, &instance.LastEvaluatedAt, &instance.Value, &instance.Threshold, &instance.Message, &instance.NotificationSent, &instance.CreatedAt, &instance.UpdatedAt)
+	err := store.database.QueryRow(ctx, query, alertID).Scan(&instance.ID, &instance.AlertID, &instance.State, &instance.PendingFiredAt, &instance.TriggeredAt, &instance.AcknowledgedAt, &instance.ResolvedAt, &instance.LastEvaluatedAt, &instance.Value, &instance.Threshold, &instance.Message, &instance.NotificationSent, &instance.CreatedAt, &instance.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -228,10 +230,11 @@ func (store *Store) GetActiveInstance(ctx context.Context, alertID uuid.UUID) (*
 
 func (store *Store) SaveInstance(ctx context.Context, instance AlertInstance) error {
 	query := `
-		INSERT INTO alert_instances (id, alert_id, state, triggered_at, acknowledged_at, resolved_at, last_evaluated_at, value, threshold, message, notification_sent, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now(), now())
+		INSERT INTO alert_instances (id, alert_id, state, pending_fired_at, triggered_at, acknowledged_at, resolved_at, last_evaluated_at, value, threshold, message, notification_sent, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), now())
 		ON CONFLICT (id) DO UPDATE
 		SET state = EXCLUDED.state,
+		    pending_fired_at = EXCLUDED.pending_fired_at,
 		    triggered_at = EXCLUDED.triggered_at,
 		    acknowledged_at = EXCLUDED.acknowledged_at,
 		    resolved_at = EXCLUDED.resolved_at,
@@ -244,7 +247,7 @@ func (store *Store) SaveInstance(ctx context.Context, instance AlertInstance) er
 	`
 
 	_, err := store.database.Exec(ctx, query,
-		instance.ID, instance.AlertID, instance.State, instance.TriggeredAt, instance.AcknowledgedAt, instance.ResolvedAt, instance.LastEvaluatedAt, instance.Value, instance.Threshold, instance.Message, instance.NotificationSent,
+		instance.ID, instance.AlertID, instance.State, instance.PendingFiredAt, instance.TriggeredAt, instance.AcknowledgedAt, instance.ResolvedAt, instance.LastEvaluatedAt, instance.Value, instance.Threshold, instance.Message, instance.NotificationSent,
 	)
 	return err
 }
@@ -374,4 +377,15 @@ func (store *Store) Delete(ctx context.Context, orgID, alertID uuid.UUID) error 
 		return pgx.ErrNoRows
 	}
 	return nil
+}
+
+func (store *Store) AcquireLock(ctx context.Context, lockKey int64) (bool, error) {
+	var acquired bool
+	err := store.database.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", lockKey).Scan(&acquired)
+	return acquired, err
+}
+
+func (store *Store) ReleaseLock(ctx context.Context, lockKey int64) error {
+	_, err := store.database.Exec(ctx, "SELECT pg_advisory_unlock($1)", lockKey)
+	return err
 }

@@ -74,6 +74,10 @@ const (
 	envAlertEvaluationInterval     = "ALERT_EVALUATION_INTERVAL_MS"
 	envRateLimitLimit              = "RATE_LIMIT_LIMIT"
 	envRateLimitBurst              = "RATE_LIMIT_BURST"
+	envRateLimitWindow             = "RATE_LIMIT_WINDOW_MS"
+	envTelemetryRetentionDays      = "TELEMETRY_RETENTION_DAYS"
+	envNotificationRetentionDays   = "NOTIFICATION_RETENTION_DAYS"
+	envRefreshTokenRetentionDays   = "REFRESH_TOKEN_RETENTION_DAYS"
 
 	defaultAppURL   = "http://localhost:3000"
 	defaultAppEnv   = "development"
@@ -138,6 +142,10 @@ const (
 	defaultAlertEvaluationIntervalMS    = 60000
 	defaultRateLimitLimit               = 100.0
 	defaultRateLimitBurst               = 200
+	defaultRateLimitWindowMS            = 1000
+	defaultTelemetryRetentionDays       = 30
+	defaultNotificationRetentionDays    = 90
+	defaultRefreshTokenRetentionDays    = 30
 )
 
 // Config holds all configuration values for the application.
@@ -211,6 +219,12 @@ type Config struct {
 	AlertEvaluationInterval     time.Duration
 	RateLimitLimit              float64
 	RateLimitBurst              int
+	RateLimitWindow             time.Duration
+
+	// Retention settings — separate windows per data class
+	TelemetryRetentionDays    int // spans, metrics, log_records
+	NotificationRetentionDays int // notification_jobs, notification_events
+	RefreshTokenRetentionDays int // revoked/expired refresh_tokens
 }
 
 func loadEnvFile() (err error) {
@@ -332,6 +346,10 @@ func Load() (*Config, error) {
 		AlertEvaluationInterval:     getEnvDurationMS(envAlertEvaluationInterval, defaultAlertEvaluationIntervalMS),
 		RateLimitLimit:              getEnvFloat(envRateLimitLimit, defaultRateLimitLimit),
 		RateLimitBurst:              getEnvInt(envRateLimitBurst, defaultRateLimitBurst),
+		RateLimitWindow:             getEnvDurationMS(envRateLimitWindow, defaultRateLimitWindowMS),
+		TelemetryRetentionDays:      getEnvInt(envTelemetryRetentionDays, defaultTelemetryRetentionDays),
+		NotificationRetentionDays:   getEnvInt(envNotificationRetentionDays, defaultNotificationRetentionDays),
+		RefreshTokenRetentionDays:   getEnvInt(envRefreshTokenRetentionDays, defaultRefreshTokenRetentionDays),
 	}, nil
 }
 

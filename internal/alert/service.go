@@ -16,12 +16,12 @@ import (
 )
 
 type Service struct {
-	store        *Store
+	store        AlertStoreInterface
 	notification *notification.Service
 	log          *slog.Logger
 }
 
-func NewService(store *Store, notificationService *notification.Service, log *slog.Logger) *Service {
+func NewService(store AlertStoreInterface, notificationService *notification.Service, log *slog.Logger) *Service {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -224,13 +224,13 @@ func (service *Service) Acknowledge(ctx context.Context, orgID, alertID uuid.UUI
 		return nil, server.NotFound(server.CodeNotFound, "no active alert instance found to acknowledge")
 	}
 
-	if instance.State == AlertStateAcknowledged {
+	if instance.State == string(AlertStateAcknowledged) {
 		resp := NewAlertInstanceResponse(*instance)
 		return &resp, nil
 	}
 
 	now := time.Now().UTC()
-	instance.State = AlertStateAcknowledged
+	instance.State = string(AlertStateAcknowledged)
 	instance.AcknowledgedAt = &now
 	instance.UpdatedAt = now
 
@@ -344,11 +344,11 @@ func (service *Service) AcknowledgeInstance(ctx context.Context, orgID, instance
 		return nil, server.NotFound(server.CodeNotFound, "alert instance not found")
 	}
 
-	if instance.State == AlertStateResolved {
+	if instance.State == string(AlertStateResolved) {
 		return nil, server.BadRequest(server.CodeValidation, "cannot acknowledge a resolved alert instance")
 	}
 
-	if instance.State == AlertStateAcknowledged {
+	if instance.State == string(AlertStateAcknowledged) {
 		resp := NewAlertInstanceResponse(*instance)
 		return &resp, nil
 	}
@@ -362,7 +362,7 @@ func (service *Service) AcknowledgeInstance(ctx context.Context, orgID, instance
 	}
 
 	now := time.Now().UTC()
-	instance.State = AlertStateAcknowledged
+	instance.State = string(AlertStateAcknowledged)
 	instance.AcknowledgedAt = &now
 	instance.UpdatedAt = now
 

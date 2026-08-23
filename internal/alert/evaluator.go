@@ -401,13 +401,18 @@ func (evaluator *TraceEvaluator) EvaluateSubCondition(ctx context.Context, orgID
 
 // CompoundEvaluator evaluates compound alert conditions containing AND/OR logical composition.
 type CompoundEvaluator struct {
-	metricsStore *metric.Store
-	logsStore    *log.Store
-	tracesStore  *trace.Store
+	metricsStore metric.MetricStoreInterface
+	logsStore    log.LogStoreInterface
+	tracesStore  trace.TraceStoreInterface
 	log          *slog.Logger
 }
 
-func NewCompoundEvaluator(metricsStore *metric.Store, logsStore *log.Store, tracesStore *trace.Store, log *slog.Logger) *CompoundEvaluator {
+func NewCompoundEvaluator(
+	metricsStore metric.MetricStoreInterface,
+	logsStore log.LogStoreInterface,
+	tracesStore trace.TraceStoreInterface,
+	log *slog.Logger,
+) *CompoundEvaluator {
 	if log == nil {
 		log = slog.Default()
 	}

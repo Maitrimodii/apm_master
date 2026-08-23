@@ -132,8 +132,8 @@ func TestAlertLifecycleTransitions(testRunner *testing.T) {
 	if instance == nil {
 		testRunner.Fatal("expected active alert instance to be created")
 	}
-	if instance.State != AlertStateFiring {
-		testRunner.Fatalf("expected state to be FIRING, got %s", instance.State)
+	if instance.State != string(AlertStateFiring) {
+		testRunner.Fatalf("expected alert state FIRING, got %s", instance.State)
 	}
 	if instance.TriggeredAt.IsZero() {
 		testRunner.Fatal("expected triggered_at to be populated")
@@ -187,8 +187,8 @@ func TestAlertLifecycleTransitions(testRunner *testing.T) {
 	if err != nil {
 		testRunner.Fatalf("Acknowledge service failed: %v", err)
 	}
-	if acknowledgedResp.State != AlertStateAcknowledged {
-		testRunner.Fatalf("expected responded state to be ACKNOWLEDGED, got %s", acknowledgedResp.State)
+	if acknowledgedResp.State != string(AlertStateAcknowledged) {
+		testRunner.Fatalf("expected state ACKNOWLEDGED, got %s", acknowledgedResp.State)
 	}
 	if acknowledgedResp.AcknowledgedAt == nil {
 		testRunner.Fatal("expected acknowledged_at to be populated in response")
@@ -202,7 +202,7 @@ func TestAlertLifecycleTransitions(testRunner *testing.T) {
 	if instance == nil {
 		testRunner.Fatal("expected active alert instance to exist")
 	}
-	if instance.State != AlertStateAcknowledged {
+	if instance.State != string(AlertStateAcknowledged) {
 		testRunner.Fatalf("expected state to be ACKNOWLEDGED in DB, got %s", instance.State)
 	}
 	if instance.AcknowledgedAt == nil || instance.AcknowledgedAt.IsZero() {
@@ -242,8 +242,8 @@ func TestAlertLifecycleTransitions(testRunner *testing.T) {
 	if instance == nil {
 		testRunner.Fatal("expected active alert instance to exist")
 	}
-	if instance.State != AlertStateAcknowledged {
-		testRunner.Fatalf("expected state to remain ACKNOWLEDGED, got %s", instance.State)
+	if instance.State != string(AlertStateAcknowledged) {
+		testRunner.Fatalf("expected active instance to still be ACKNOWLEDGED, got %s", instance.State)
 	}
 
 	// Verify no new alert_firing or alert_acknowledged notifications
@@ -295,7 +295,7 @@ func TestAlertLifecycleTransitions(testRunner *testing.T) {
 	if err != nil {
 		testRunner.Fatalf("query alert_instances details: %v", err)
 	}
-	if resolvedState != AlertStateResolved {
+	if resolvedState != string(AlertStateResolved) {
 		testRunner.Fatalf("expected resolved state to be RESOLVED, got %s", resolvedState)
 	}
 	if ackedAt == nil {
@@ -354,8 +354,8 @@ func TestAlertLifecycleTransitions(testRunner *testing.T) {
 	if instance == nil {
 		testRunner.Fatal("expected new active instance to be created on re-fire")
 	}
-	if instance.State != AlertStateFiring {
-		testRunner.Fatalf("expected re-fired alert state to be FIRING, got %s", instance.State)
+	if instance.State != string(AlertStateFiring) {
+		testRunner.Fatalf("expected active alert instance to return to FIRING, got %s", instance.State)
 	}
 	if instance.AcknowledgedAt != nil {
 		testRunner.Fatal("expected new firing instance acknowledged_at to be nil")
@@ -448,8 +448,8 @@ func TestAlertLifecycleFiringToResolvedDirectly(testRunner *testing.T) {
 	if err != nil {
 		testRunner.Fatalf("GetActiveInstance failed: %v", err)
 	}
-	if instance == nil || instance.State != AlertStateFiring {
-		testRunner.Fatalf("expected instance to be FIRING")
+	if instance == nil || instance.State != string(AlertStateFiring) {
+		testRunner.Fatalf("expected active alert instance in FIRING state, got: %v", instance)
 	}
 
 	// Clean metrics table and write recovery metric
@@ -490,7 +490,7 @@ func TestAlertLifecycleFiringToResolvedDirectly(testRunner *testing.T) {
 	if err != nil {
 		testRunner.Fatalf("query details failed: %v", err)
 	}
-	if resolvedState != AlertStateResolved {
+	if resolvedState != string(AlertStateResolved) {
 		testRunner.Fatalf("expected state RESOLVED, got %s", resolvedState)
 	}
 	if ackedAt != nil {
@@ -589,7 +589,7 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	inst1 := AlertInstance{
 		ID:              uuid.New(),
 		AlertID:         alertA1.ID,
-		State:           AlertStateFiring,
+		State:           string(AlertStateFiring),
 		TriggeredAt:     now.Add(-2 * time.Hour),
 		LastEvaluatedAt: now.Add(-2 * time.Hour),
 		Value:           95.5,
@@ -603,8 +603,8 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	inst2 := AlertInstance{
 		ID:              uuid.New(),
 		AlertID:         alertA2.ID,
-		State:           AlertStateAcknowledged,
-		TriggeredAt:     now.Add(-1 * time.Hour),
+		State:           string(AlertStateAcknowledged),
+		TriggeredAt:     time.Now().Add(-10 * time.Minute),
 		LastEvaluatedAt: now.Add(-1 * time.Hour),
 		AcknowledgedAt:  &now,
 		Value:           85.0,
@@ -619,8 +619,8 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	inst3 := AlertInstance{
 		ID:              uuid.New(),
 		AlertID:         alertA1.ID,
-		State:           AlertStateResolved,
-		TriggeredAt:     now.Add(-30 * time.Minute),
+		State:           string(AlertStateResolved),
+		TriggeredAt:     time.Now().Add(-20 * time.Minute),
 		LastEvaluatedAt: now.Add(-10 * time.Minute),
 		ResolvedAt:      &resolvedTime,
 		Value:           70.0,
@@ -634,8 +634,8 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	instB := AlertInstance{
 		ID:              uuid.New(),
 		AlertID:         alertB1.ID,
-		State:           AlertStateFiring,
-		TriggeredAt:     now.Add(-5 * time.Minute),
+		State:           string(AlertStateFiring),
+		TriggeredAt:     time.Now().Add(-5 * time.Minute),
 		LastEvaluatedAt: now.Add(-5 * time.Minute),
 		Value:           92.0,
 		Threshold:       90.0,
@@ -664,7 +664,7 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	}
 
 	// 2. Filter state=FIRING
-	res, total, err = service.ListInstances(ctx, orgA, AlertStateFiring, "", uuid.Nil, nil, nil, 1, 10)
+	res, total, err = service.ListInstances(ctx, orgA, string(AlertStateFiring), "", uuid.Nil, nil, nil, 1, 10)
 	if err != nil {
 		testRunner.Fatalf("ListInstances with state filter failed: %v", err)
 	}
@@ -673,7 +673,7 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	}
 
 	// 3. Filter state=ACKNOWLEDGED
-	res, total, err = service.ListInstances(ctx, orgA, AlertStateAcknowledged, "", uuid.Nil, nil, nil, 1, 10)
+	res, total, err = service.ListInstances(ctx, orgA, string(AlertStateAcknowledged), "", uuid.Nil, nil, nil, 1, 10)
 	if err != nil {
 		testRunner.Fatalf("ListInstances with state filter failed: %v", err)
 	}
@@ -682,7 +682,7 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	}
 
 	// 4. Filter state=RESOLVED
-	res, total, err = service.ListInstances(ctx, orgA, AlertStateResolved, "", uuid.Nil, nil, nil, 1, 10)
+	res, total, err = service.ListInstances(ctx, orgA, string(AlertStateResolved), "", uuid.Nil, nil, nil, 1, 10)
 	if err != nil {
 		testRunner.Fatalf("ListInstances with state filter failed: %v", err)
 	}
@@ -741,8 +741,8 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	if err != nil {
 		testRunner.Fatalf("GetInstanceDetails failed: %v", err)
 	}
-	if details.AlertName != "cpu-high-a" || details.State != AlertStateFiring || details.Severity != "high" {
-		testRunner.Fatalf("returned incorrect details for inst1")
+	if details.AlertName != "cpu-high-a" || details.State != string(AlertStateFiring) || details.Severity != "high" {
+		testRunner.Fatalf("unexpected instance details: %+v", details)
 	}
 
 	// Org isolation check on GetInstanceDetails
@@ -757,8 +757,8 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	if err != nil {
 		testRunner.Fatalf("AcknowledgeInstance failed: %v", err)
 	}
-	if ackResp.State != AlertStateAcknowledged || ackResp.AcknowledgedAt == nil {
-		testRunner.Fatal("acknowledgement failed to transition state")
+	if ackResp.State != string(AlertStateAcknowledged) || ackResp.AcknowledgedAt == nil {
+		testRunner.Fatalf("failed to acknowledge instance via direct endpoint: %+v", ackResp)
 	}
 
 	// Acknowledge inst3 (RESOLVED) - should fail
