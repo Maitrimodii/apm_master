@@ -44,10 +44,12 @@ flowchart TB
     subgraph Data
         DB[(Postgres / Timescale)]
         EVT[(notification_events)]
+        CACHE[(Redis)]
     end
 
     U --> API
     O --> API
+    API --> CACHE
     API --> AUTH
     API --> INGEST
     API --> QUERY
@@ -74,6 +76,8 @@ The application is organized around a few primary responsibilities:
 - internal/metrics: lists metric names, reads time series, computes aggregations, and exposes histograms for dashboard and SLO-style analysis
 - internal/alerts: stores alert definitions, validates severity and conditions, and shares alerts with recipients
 - internal/notifications: records notification events and dispatches them through provider adapters
+- internal/scheduler: registers and executes background jobs (alert evaluation, data retention)
+- internal/retention: manages TTL configurations and sweeps old telemetry data from TimescaleDB
 
 ```mermaid
 flowchart LR
@@ -135,6 +139,7 @@ This gives the application a clear separation of concerns: authentication, data 
 
 - Postgres / TimescaleDB for telemetry and event state
 - Apache Kafka for durable, replayable telemetry ingestion
+- Redis for API rate limiting
 - SMTP provider for email delivery
 - Slack and Teams adapters (currently placeholders in the notification package)
 - JWT signing material supplied through environment variables
@@ -145,7 +150,7 @@ This gives the application a clear separation of concerns: authentication, data 
 
 #### internal/server
 - builds the Gin router
-- wires middleware for request IDs, logging, recovery, and body limits
+- wires middleware for request IDs, logging, recovery, API rate limiting (via Redis), and body limits
 - exposes /health
 
 #### internal/auth
@@ -175,6 +180,8 @@ This gives the application a clear separation of concerns: authentication, data 
 - internal/db: DB initialization and migration wiring
 - internal/notifications: service, worker, store, providers, models
 - internal/alerts: alert domain model and service handlers
+- internal/scheduler: cron and interval-based background job execution engine
+- internal/retention: tasks and logic for managing data lifecycle and deletion
 
 ### Core workflows
 
@@ -319,17 +326,20 @@ The notification queue is a PostgreSQL-backed durable queue that operates as fol
 
 A typical deployment consists of:
 
-1. one application instance running the API server and notification worker
+1. one application instance running the API server and notification worker (can be split into API and Scheduler processes)
 2. one Postgres/TimescaleDB instance for telemetry and notification state
-3. SMTP or another mail transport for email notifications
+3. one Redis instance for rate limiting
+4. SMTP or another mail transport for email notifications
 
 ```mermaid
 flowchart LR
-    LB[Load balancer / ingress] --> APP1[APM Master instance]
+    LB[Load balancer / ingress] --> APP1[APM Master API]
+    APP1 --> CACHE[(Redis)]
     APP1 --> DB[(Postgres)]
-    APP1 --> SMTP[SMTP relay]
-    APP1 --> Slack[Slack webhook]
-    APP1 --> Teams[Teams webhook]
+    APP2[APM Scheduler] --> DB
+    APP2 --> SMTP[SMTP relay]
+    APP2 --> Slack[Slack webhook]
+    APP2 --> Teams[Teams webhook]
 ```
 
 ## 4. Operational Guidance

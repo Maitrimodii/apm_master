@@ -92,6 +92,7 @@ Workers poll the queue by ordering jobs by `priority DESC` then `created_at ASC`
 - Telemetry ingest and query modules: [internal/ingest](file:///home/maitri/project/apm_master/internal/ingest), [internal/traces](file:///home/maitri/project/apm_master/internal/traces), [internal/logs](file:///home/maitri/project/apm_master/internal/logs), [internal/metrics](file:///home/maitri/project/apm_master/internal/metrics)
 - Alert management: [internal/alerts](file:///home/maitri/project/apm_master/internal/alerts)
 - Notification delivery: [internal/notifications](file:///home/maitri/project/apm_master/internal/notifications)
+- Background Jobs & Data Retention: [internal/scheduler](file:///home/maitri/project/apm_master/internal/scheduler) and [internal/retention](file:///home/maitri/project/apm_master/internal/retention)
 - Database connection pool and migrations: [internal/db](file:///home/maitri/project/apm_master/internal/db) and migrations under [migrations/](file:///home/maitri/project/apm_master/migrations)
 - Structured logging: [internal/logger](file:///home/maitri/project/apm_master/internal/logger)
 
@@ -106,6 +107,7 @@ Workers poll the queue by ordering jobs by `priority DESC` then `created_at ASC`
 ```mermaid
 flowchart LR
     Client[Client / OTLP sender] --> API[API server]
+    API --> CACHE[(Redis)]
     API --> Auth[Auth + permissions]
     API --> Ingest[Ingest module]
     API --> Query[Traces / Logs / Metrics]
@@ -115,6 +117,7 @@ flowchart LR
     Query --> DB
     Alerts --> DB
     Notify --> DB
+    Scheduler[Background Scheduler] --> DB
     Notify --> SMTP[SMTP provider]
     Notify --> Slack[Slack provider]
     Notify --> Teams[Teams provider]
@@ -151,6 +154,10 @@ flowchart LR
    - Workers attempt delivery via configured channels (SMTP, Slack hooks, Teams hooks).
    - **Retries & Backoff**: Failing delivery jobs are rescheduled with **exponential backoff** (`2^attempts` seconds) and updated to `pending`. If the job exceeds `max_attempts`, it is routed to the `dead_letter` state and delivery status is persisted in the `notification_events` table for auditable diagnostics.
 
+6. **Data Retention (Scheduler)**:
+   - A background task periodically sweeps older telemetry data (traces, metrics, logs) and historical notification jobs that have exceeded their configured Time-To-Live (TTL).
+   - This prevents unbounded growth of the TimescaleDB tables over time.
+
 
 ## Major module responsibilities
 
@@ -164,13 +171,14 @@ The application is organized into the following main areas:
 - [internal/metrics](file:///home/maitri/project/apm_master/internal/metrics): metric names, samples, aggregations, histograms, and time series
 - [internal/alerts](file:///home/maitri/project/apm_master/internal/alerts): alert definitions, alert instances (incidents), background scheduling/evaluation, and sharing workflows
 - [internal/notifications](file:///home/maitri/project/apm_master/internal/notifications): database-backed priority durable queue, concurrent retry workers with backoff/DLQ, provider adapters
+- [internal/scheduler](file:///home/maitri/project/apm_master/internal/scheduler) & [internal/retention](file:///home/maitri/project/apm_master/internal/retention): cron execution for alert checks and old data cleanup
 - [internal/db](file:///home/maitri/project/apm_master/internal/db): database connection pool initialization and migration wiring
 - [internal/logger](file:///home/maitri/project/apm_master/internal/logger): structured application logger initialization
 
 ### [internal/server](file:///home/maitri/project/apm_master/internal/server)
 - starts the HTTP server
 - exposes health checks at `/health`
-- wires middleware such as API key validation, JWT authentication, permission checks, request logging, recovery, body limits, and request IDs
+- wires middleware such as API key validation, JWT authentication, permission checks, request logging, recovery, API rate limiting (backed by Redis), and body limits
 
 ### [internal/auth](file:///home/maitri/project/apm_master/internal/auth)
 - handles registration, login, invitations, token generation, and API keys
@@ -197,6 +205,10 @@ The application is organized into the following main areas:
 - handles exponential backoff retries and dead-letter queue (DLQ) state transitions
 - stores audit records in `notification_events` for delivery status tracking
 
+### [internal/scheduler](file:///home/maitri/project/apm_master/internal/scheduler) & [internal/retention](file:///home/maitri/project/apm_master/internal/retention)
+- centralizes execution of recurring tasks like alert evaluation
+- periodically removes telemetry and notification records that exceed configured retention windows (`TELEMETRY_RETENTION_DAYS`)
+
 ### [internal/db](file:///home/maitri/project/apm_master/internal/db)
 - initializes the `pgxpool.Pool` database connection pool and handles connection pings
 - manages automatic startup database migration execution using `golang-migrate`
@@ -209,10 +221,10 @@ The application is organized into the following main areas:
 ### 1. Start the dependencies
 
 ```bash
-docker compose -f deploy/docker/docker-compose.yml --env-file deploy/docker/.env.docker up -d kafka postgres
+docker compose -f deploy/docker/docker-compose.yml --env-file deploy/docker/.env.docker up -d kafka postgres redis
 ```
 
-The compose file loads configurations from `.env.docker` and starts Kafka on host port 9092 and a TimescaleDB instance on host port 5433 (mapped to container port 5432) with the configured database, user, and password used by the app.
+The compose file loads configurations from `.env.docker` and starts Kafka, Redis, and a TimescaleDB instance on host port 5433 (mapped to container port 5432) with the configured database, user, and password used by the app.
 
 ### 2. Configure the runtime environment
 
@@ -220,8 +232,10 @@ Example:
 
 ```bash
 export APP_ENV=development
+export APP_MODE=all
 export LOG_LEVEL=info
 export HTTP_PORT=8080
+export REDIS_URL=localhost:6379
 export POSTGRES_HOST=localhost
 export POSTGRES_PORT=5433
 export POSTGRES_USER=apm_user
@@ -295,12 +309,15 @@ The configuration layer is defined in [internal/config/config.go](file:///home/m
 | --- | --- | --- |
 | APPURL | base url for application links | http://localhost:3000 |
 | APP_ENV | runtime environment name | development |
+| APP_MODE | process execution mode (`all`, `api`, `scheduler`) | all |
 | LOG_LEVEL | logger verbosity | info |
 | HTTP_PORT | API server port | 8080 |
 | HTTP_READ_TIMEOUT_MS / HTTP_WRITE_TIMEOUT_MS / HTTP_IDLE_TIMEOUT_MS / HTTP_HEADER_TIMEOUT_MS | HTTP server timeouts | 10 s / 30 s / 120 s / 5 s |
 | MAX_BODY_BYTES | maximum request body size | 10 MB |
 | POSTGRES_HOST / POSTGRES_PORT / POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB | database settings | localhost / 5432 / apm_user / empty / apm_db |
 | POSTGRES_TIMEOUT_MS | DB connection timeout | 5 s |
+| REDIS_URL / REDIS_TIMEOUT_MS | Redis connection settings for rate limits | localhost:6379 / 5 s |
+| RATE_LIMIT_LIMIT / RATE_LIMIT_BURST / RATE_LIMIT_WINDOW_MS | API rate limit configurations | 100 / 200 / 1 s |
 | JWT_SECRET | signing key for tokens and sessions | required |
 | ACCESS_TOKEN_EXPIRY_MINS / REFRESH_TOKEN_EXPIRY_DAYS / INVITE_EXPIRY_DAYS / PASSWORD_RESET_EXPIRY_MINS | auth timeouts | 15 / 7 / 10 / 30 |
 | EMAIL_FROM | sender identity for email notifications | no-reply@apm-master.local |
@@ -312,6 +329,8 @@ The configuration layer is defined in [internal/config/config.go](file:///home/m
 | KAFKA_COMPRESSION / KAFKA_PRODUCER_BATCH_SIZE / KAFKA_PRODUCER_BATCH_BYTES / KAFKA_PRODUCER_BATCH_TIMEOUT_MS / KAFKA_PRODUCER_WRITE_TIMEOUT_MS | producer durability, compression, and batching | lz4 / 1000 / 1 MB / 10 ms / 10 s |
 | KAFKA_CONSUMER_WORKERS / KAFKA_CONSUMER_BATCH_RECORDS / KAFKA_CONSUMER_BATCH_BYTES / KAFKA_CONSUMER_FLUSH_INTERVAL_MS / KAFKA_CONSUMER_MAX_ATTEMPTS | consumer group concurrency, batching, and retry policy | 3 / 1000 / 4 MB / 1 s / 5 |
 | ALERT_EVALUATION_INTERVAL_MS | frequency of alert condition evaluation | 60 s (60000 ms) |
+| TELEMETRY_RETENTION_DAYS | time-to-live for historical telemetry in DB | 30 days |
+| NOTIFICATION_RETENTION_DAYS | time-to-live for audit notification jobs in DB | 90 days |
 
 Important operational note: SMTP delivery is currently conditional on SMTP_HOST being set. If SMTP is not configured, the email provider will not send messages and the caller may only observe a silent no-op unless the worker logs indicate the misconfiguration.
 
