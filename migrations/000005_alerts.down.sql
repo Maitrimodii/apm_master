@@ -1,3 +1,3 @@
-DROP TABLE IF EXISTS alert_evaluation_history;
-DROP TABLE IF EXISTS alert_instances;
-DROP TABLE IF EXISTS alerts;
+DROP TABLE IF EXISTS alert_evaluation_history CASCADE;
+DROP TABLE IF EXISTS alert_instances CASCADE;
+DROP TABLE IF EXISTS alerts CASCADE;

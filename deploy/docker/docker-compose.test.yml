@@ -1,5 +1,3 @@
-version: "3.9"
-
 networks:
   apm:
     driver: bridge
@@ -10,7 +8,7 @@ volumes:
 
 services:
   kafka:
-    image: bitnami/kafka:3.7
+    image: bitnamilegacy/kafka:3.7
     container_name: apm-test-kafka
     networks:
       - apm

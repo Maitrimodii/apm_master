@@ -70,21 +70,6 @@ func (s *Store) GetTrace(ctx context.Context, orgID uuid.UUID, traceID string) (
 }
 
 func (s *Store) ListTraceSummaries(ctx context.Context, query ListSpansQuery) ([]TraceSummary, int, error) {
-	baseSQL := `
-		SELECT
-			trace_id,
-			MAX(service_name) as service_name,
-			MAX(span_name) as endpoint,
-			SUM(duration_ns) / 1000000.0 as duration_ms,
-			MAX(status_code) as status,
-			COUNT(span_id) as span_count,
-			COUNT(CASE WHEN status_code = 'ERROR' THEN 1 END) as error_count,
-			0.0 as db_time_ms,
-			0.0 as middleware_time_ms
-		FROM spans
-		WHERE org_id = $1
-	`
-	
 	args := []any{query.OrgID}
 	argID := 2
 	
@@ -115,20 +100,73 @@ func (s *Store) ListTraceSummaries(ctx context.Context, query ListSpansQuery) ([
 		argID++
 	}
 
+	whereClause := "WHERE org_id = $1"
 	if len(conds) > 0 {
-		baseSQL += " AND " + strings.Join(conds, " AND ")
+		whereClause += " AND " + strings.Join(conds, " AND ")
 	}
 
-	baseSQL += " GROUP BY trace_id"
+	baseSQL := fmt.Sprintf(`
+		WITH filtered_spans AS (
+			SELECT
+				span_id,
+				trace_id,
+				parent_id,
+				service_name,
+				span_name,
+				span_kind,
+				start_time,
+				end_time,
+				duration_ns,
+				status_code,
+				(LOWER(span_kind) = 'client' OR span_name LIKE 'gorm.%%%%' OR span_name LIKE 'sql.%%%%' OR span_attrs->>'db.system' IS NOT NULL) as is_db,
+				(span_name = 'jwt-validation' OR span_name LIKE 'middleware.%%%%' OR span_attrs->>'component' = 'middleware') as is_middleware
+			FROM spans
+			%s
+		)
+		SELECT
+			trace_id,
+			MAX(service_name) as service_name,
+			COALESCE(
+				MAX(CASE WHEN parent_id IS NULL OR parent_id = '' OR parent_id = '0000000000000000' OR LOWER(span_kind) = 'server' THEN span_name END),
+				MAX(span_name)
+			) as endpoint,
+			COALESCE(
+				MAX(CASE WHEN parent_id IS NULL OR parent_id = '' OR parent_id = '0000000000000000' OR LOWER(span_kind) = 'server' THEN duration_ns END) / 1000000.0,
+				EXTRACT(EPOCH FROM (MAX(end_time) - MIN(start_time))) * 1000.0
+			) as duration_ms,
+			MAX(status_code) as status,
+			COUNT(span_id) as span_count,
+			COUNT(CASE WHEN status_code = 'ERROR' THEN 1 END) as error_count,
+			COALESCE(
+				SUM(
+					CASE 
+						WHEN is_db AND (parent_id IS NULL OR parent_id NOT IN (SELECT s2.span_id FROM filtered_spans s2 WHERE s2.is_db))
+						THEN duration_ns 
+					END
+				) / 1000000.0,
+				0.0
+			) as db_time_ms,
+			COALESCE(
+				SUM(
+					CASE 
+						WHEN is_middleware AND (parent_id IS NULL OR parent_id NOT IN (SELECT s3.span_id FROM filtered_spans s3 WHERE s3.is_middleware))
+						THEN duration_ns 
+					END
+				) / 1000000.0,
+				0.0
+			) as middleware_time_ms
+		FROM filtered_spans
+		GROUP BY trace_id`, whereClause)
 	
+	durationExpr := "COALESCE(MAX(CASE WHEN parent_id IS NULL OR parent_id = '' OR parent_id = '0000000000000000' OR LOWER(span_kind) = 'server' THEN duration_ns END) / 1000000.0, EXTRACT(EPOCH FROM (MAX(end_time) - MIN(start_time))) * 1000.0)"
 	var havingConds []string
 	if query.MinDurationMS > 0 {
-		havingConds = append(havingConds, fmt.Sprintf("SUM(duration_ns) / 1000000.0 >= $%d", argID))
+		havingConds = append(havingConds, fmt.Sprintf("%s >= $%d", durationExpr, argID))
 		args = append(args, query.MinDurationMS)
 		argID++
 	}
 	if query.MaxDurationMS > 0 {
-		havingConds = append(havingConds, fmt.Sprintf("SUM(duration_ns) / 1000000.0 <= $%d", argID))
+		havingConds = append(havingConds, fmt.Sprintf("%s <= $%d", durationExpr, argID))
 		args = append(args, query.MaxDurationMS)
 		argID++
 	}

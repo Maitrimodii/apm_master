@@ -69,6 +69,52 @@ func MigrateDown(dsn string, migrationsDir string) (err error) {
 	return nil
 }
 
+func MigrateVersion(dsn string, migrationsDir string) (version uint, dirty bool, err error) {
+	mapItem, err := migrate.New(
+		fmt.Sprintf("file://%s", migrationsDir),
+		dsn,
+	)
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to create migrator: %w", err)
+	}
+	defer func() {
+		if closeErr := closeMigrator(mapItem); closeErr != nil {
+			if err != nil {
+				err = errors.Join(err, closeErr)
+				return
+			}
+			err = closeErr
+		}
+	}()
+
+	return mapItem.Version()
+}
+
+func MigrateForce(dsn string, migrationsDir string, version int) (err error) {
+	mapItem, err := migrate.New(
+		fmt.Sprintf("file://%s", migrationsDir),
+		dsn,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create migrator: %w", err)
+	}
+	defer func() {
+		if closeErr := closeMigrator(mapItem); closeErr != nil {
+			if err != nil {
+				err = errors.Join(err, closeErr)
+				return
+			}
+			err = closeErr
+		}
+	}()
+
+	if err := mapItem.Force(version); err != nil {
+		return fmt.Errorf("failed to force migration version %d: %w", version, err)
+	}
+
+	return nil
+}
+
 func closeMigrator(mapItem *migrate.Migrate) error {
 	sourceErr, databaseErr := mapItem.Close()
 	if sourceErr == nil && databaseErr == nil {
@@ -76,3 +122,4 @@ func closeMigrator(mapItem *migrate.Migrate) error {
 	}
 	return fmt.Errorf("close migrator: %w", errors.Join(sourceErr, databaseErr))
 }
+
