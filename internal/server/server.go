@@ -29,12 +29,13 @@ func NewServer(
 	}
 
 	// Liveness probe (HTTP server is running)
-	router.GET("/healthz", func(c *gin.Context) {
+	healthHandler := func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
+	}
+	router.GET("/api/v1/healthz", healthHandler)
 
 	// Readiness probe (Dependencies are available)
-	router.GET("/readyz", func(c *gin.Context) {
+	readyHandler := func(c *gin.Context) {
 		if health == nil {
 			c.JSON(http.StatusOK, gin.H{"status": "ok", "note": "no readiness checker configured"})
 			return
@@ -45,6 +46,12 @@ func NewServer(
 			status = http.StatusServiceUnavailable
 		}
 		c.JSON(status, report)
+	}
+	router.GET("/api/v1/readyz", readyHandler)
+
+	// Ensure OPTIONS preflights never 404
+	router.OPTIONS("/*path", func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
 	})
 
 	handler.RegisterRoutes(router)

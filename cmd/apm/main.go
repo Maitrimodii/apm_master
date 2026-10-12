@@ -129,6 +129,7 @@ func run() error {
 	)
 
 	middlewares := []gin.HandlerFunc{
+		middleware.CORS(),
 		middleware.RequestID(),
 		middleware.Logger(logger),
 		middleware.Recovery(logger),
