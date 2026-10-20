@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/Maitrimodii/apm_master/internal/config"
 	"github.com/Maitrimodii/apm_master/internal/database"
 	"github.com/Maitrimodii/apm_master/internal/ingest"
+	"github.com/Maitrimodii/apm_master/internal/investigation"
 	"github.com/Maitrimodii/apm_master/internal/log"
 	applogger "github.com/Maitrimodii/apm_master/internal/logger"
 	"github.com/Maitrimodii/apm_master/internal/metric"
@@ -25,6 +27,7 @@ import (
 	"github.com/Maitrimodii/apm_master/internal/server"
 	"github.com/Maitrimodii/apm_master/internal/server/middleware"
 	"github.com/Maitrimodii/apm_master/internal/trace"
+	kafkago "github.com/segmentio/kafka-go"
 
 	"github.com/gin-gonic/gin"
 )
@@ -114,6 +117,18 @@ func run() error {
 		Logger:            logger,
 	}
 
+	// Dedicated Kafka writer for AI investigation outbox
+	invKafkaWriter := &kafkago.Writer{
+		Addr:         kafkago.TCP(strings.Split(cfg.KafkaBrokers, ",")...),
+		Topic:        cfg.KafkaAIInvestigationTopic,
+		Balancer:     &kafkago.Hash{},
+		MaxAttempts:  cfg.KafkaProducerMaxAttempts,
+		BatchSize:    cfg.InvestigationOutboxBatchSize,
+		BatchTimeout: 10 * time.Millisecond,
+		WriteTimeout: cfg.KafkaProducerWriteTimeout,
+		RequiredAcks: kafkago.RequireAll,
+	}
+
 	apiHandler := server.NewAPIHandler(
 		[]server.RouteRegistrar{
 			identityModule,
@@ -125,6 +140,13 @@ func run() error {
 				moduleDeps,
 				notificationService,
 			),
+			investigation.NewModule(moduleDeps),
+		},
+	)
+
+	internalHandler := server.NewInternalHandler(
+		[]server.RouteRegistrar{
+			investigation.NewInternalModule(moduleDeps, cfg),
 		},
 	)
 
@@ -144,7 +166,11 @@ func run() error {
 		middlewares,
 		apiHandler,
 		healthChecker,
+		internalHandler,
 	)
+
+	outboxPublisher := investigation.NewPublisher(databaseInstance.Pool(), invKafkaWriter, cfg, logger)
+	go outboxPublisher.Run(appCtx)
 
 	var jobScheduler *scheduler.Scheduler
 	if cfg.AppMode == "all" || cfg.AppMode == "" {
@@ -212,6 +238,11 @@ func run() error {
 	
 	if jobScheduler != nil {
 		jobScheduler.Stop()
+	}
+
+	outboxPublisher.Stop()
+	if err := invKafkaWriter.Close(); err != nil {
+		logger.Error("failed to close investigation kafka writer", slog.Any("error", err))
 	}
 
 	notifyCtx, notifyCancel := context.WithTimeout(context.Background(), shutdownTimeout)

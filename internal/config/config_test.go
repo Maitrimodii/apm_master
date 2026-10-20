@@ -188,8 +188,14 @@ func validConfig() *Config {
 		KafkaConsumerMaxAttempts:    5,
 		KafkaConsumerRetryInitial:   250 * time.Millisecond,
 		KafkaConsumerRetryMax:       5 * time.Second,
-		AlertEvaluationInterval:     60 * time.Second,
-		RateLimitLimit:              100.0,
-		RateLimitBurst:              200,
+		AlertEvaluationInterval:         60 * time.Second,
+		RateLimitLimit:                  100.0,
+		RateLimitBurst:                  200,
+		KafkaAIInvestigationTopic:       "ai.investigation.jobs",
+		KafkaAIRetryTopic:               "ai.investigation.retry",
+		KafkaAIDLQTopic:                 "ai.investigation.dlq",
+		AIServiceToken:                  "valid-ai-service-token",
+		InvestigationOutboxPollInterval: 2 * time.Second,
+		InvestigationOutboxBatchSize:    50,
 	}
 }

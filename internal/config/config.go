@@ -79,6 +79,13 @@ const (
 	envNotificationRetentionDays   = "NOTIFICATION_RETENTION_DAYS"
 	envRefreshTokenRetentionDays   = "REFRESH_TOKEN_RETENTION_DAYS"
 
+	envKafkaAIInvestigationTopic         = "KAFKA_AI_INVESTIGATION_TOPIC"
+	envKafkaAIRetryTopic                 = "KAFKA_AI_RETRY_TOPIC"
+	envKafkaAIDLQTopic                   = "KAFKA_AI_DLQ_TOPIC"
+	envAIServiceToken                    = "AI_SERVICE_TOKEN"
+	envInvestigationOutboxPollIntervalMS = "INVESTIGATION_OUTBOX_POLL_INTERVAL_MS"
+	envInvestigationOutboxBatchSize      = "INVESTIGATION_OUTBOX_BATCH_SIZE"
+
 	defaultAppURL   = "http://localhost:3000"
 	defaultAppEnv   = "development"
 	defaultAppMode  = "all"
@@ -146,6 +153,13 @@ const (
 	defaultTelemetryRetentionDays       = 30
 	defaultNotificationRetentionDays    = 90
 	defaultRefreshTokenRetentionDays    = 30
+
+	defaultKafkaAIInvestigationTopic         = "ai.investigation.jobs"
+	defaultKafkaAIRetryTopic                 = "ai.investigation.retry"
+	defaultKafkaAIDLQTopic                   = "ai.investigation.dlq"
+	defaultAIServiceToken                    = "apm-ai-secret-token-change-in-production"
+	defaultInvestigationOutboxPollIntervalMS = 2000
+	defaultInvestigationOutboxBatchSize      = 50
 )
 
 // Config holds all configuration values for the application.
@@ -225,6 +239,14 @@ type Config struct {
 	TelemetryRetentionDays    int // spans, metrics, log_records
 	NotificationRetentionDays int // notification_jobs, notification_events
 	RefreshTokenRetentionDays int // revoked/expired refresh_tokens
+
+	// AI Investigation settings
+	KafkaAIInvestigationTopic       string
+	KafkaAIRetryTopic               string
+	KafkaAIDLQTopic                 string
+	AIServiceToken                  string
+	InvestigationOutboxPollInterval time.Duration
+	InvestigationOutboxBatchSize    int
 }
 
 func loadEnvFile() (err error) {
@@ -350,6 +372,13 @@ func Load() (*Config, error) {
 		TelemetryRetentionDays:      getEnvInt(envTelemetryRetentionDays, defaultTelemetryRetentionDays),
 		NotificationRetentionDays:   getEnvInt(envNotificationRetentionDays, defaultNotificationRetentionDays),
 		RefreshTokenRetentionDays:   getEnvInt(envRefreshTokenRetentionDays, defaultRefreshTokenRetentionDays),
+
+		KafkaAIInvestigationTopic:       getEnv(envKafkaAIInvestigationTopic, defaultKafkaAIInvestigationTopic),
+		KafkaAIRetryTopic:               getEnv(envKafkaAIRetryTopic, defaultKafkaAIRetryTopic),
+		KafkaAIDLQTopic:                 getEnv(envKafkaAIDLQTopic, defaultKafkaAIDLQTopic),
+		AIServiceToken:                  getEnv(envAIServiceToken, defaultAIServiceToken),
+		InvestigationOutboxPollInterval: getEnvDurationMS(envInvestigationOutboxPollIntervalMS, defaultInvestigationOutboxPollIntervalMS),
+		InvestigationOutboxBatchSize:    getEnvInt(envInvestigationOutboxBatchSize, defaultInvestigationOutboxBatchSize),
 	}, nil
 }
 
@@ -484,6 +513,14 @@ func (config *Config) Validate() error {
 		// --- Rate Limiting ---
 		{config.RateLimitLimit > 0, fmt.Errorf("RATE_LIMIT_LIMIT must be greater than 0")},
 		{config.RateLimitBurst > 0, fmt.Errorf("RATE_LIMIT_BURST must be greater than 0")},
+
+		// --- AI Investigation ---
+		{config.KafkaAIInvestigationTopic != "", fmt.Errorf("KAFKA_AI_INVESTIGATION_TOPIC must be set")},
+		{config.KafkaAIRetryTopic != "", fmt.Errorf("KAFKA_AI_RETRY_TOPIC must be set")},
+		{config.KafkaAIDLQTopic != "", fmt.Errorf("KAFKA_AI_DLQ_TOPIC must be set")},
+		{config.AIServiceToken != "", fmt.Errorf("AI_SERVICE_TOKEN must be set")},
+		{config.InvestigationOutboxPollInterval > 0, fmt.Errorf("INVESTIGATION_OUTBOX_POLL_INTERVAL_MS must be greater than 0")},
+		{config.InvestigationOutboxBatchSize > 0, fmt.Errorf("INVESTIGATION_OUTBOX_BATCH_SIZE must be greater than 0")},
 	}
 
 	var errs []error

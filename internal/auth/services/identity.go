@@ -202,6 +202,8 @@ func (service *IdentityService) seedAdminPermissions(
 		{Name: "api_key", Action: models.Read, Description: "View API keys"},
 		{Name: "api_key", Action: models.Write, Description: "Create API keys"},
 		{Name: "api_key", Action: models.Delete, Description: "Revoke API keys"},
+		{Name: "investigations", Action: models.Read, Description: "View incident investigations, reports, and evidence"},
+		{Name: "investigations", Action: models.Write, Description: "Create, retry, and cancel incident investigations"},
 	}
 
 	for _, permission := range defaultPermissions {

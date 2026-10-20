@@ -20,6 +20,7 @@ func NewServer(
 	middlewares []gin.HandlerFunc,
 	handler *APIHandler,
 	health *HealthChecker,
+	internalHandler ...*InternalHandler,
 ) *Server {
 
 	router := gin.New()
@@ -55,6 +56,12 @@ func NewServer(
 	})
 
 	handler.RegisterRoutes(router)
+
+	for _, ih := range internalHandler {
+		if ih != nil {
+			ih.RegisterRoutes(router)
+		}
+	}
 
 	return &Server{
 		config: cfg,

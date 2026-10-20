@@ -5,33 +5,20 @@
 *.dll
 *.so
 *.dylib
+
+# Test binaries and outputs
 *.test
 *.out
 *.prof
-
-# Dependency directories
-vendor/
-
-# Go Workspace files
-go.work
-go.work.sum
 
 # Environment files (contains credentials)
 .env
 .env.local
 .env.*.local
 .env.docker
+!.env.example
 
-# IDEs, Agent tools, and OS files
+# IDEs, Agent tools, and OS files (existing on disk)
 .vscode/
-.idea/
 .codex/
-.chat/
 .agents/
-.DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-Thumbs.db

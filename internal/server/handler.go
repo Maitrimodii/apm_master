@@ -33,3 +33,29 @@ func (handler *APIHandler) RegisterRoutes(
 		handlerItem.RegisterRoutes(api)
 	}
 }
+
+// InternalHandler coordinates all internal module handlers.
+type InternalHandler struct {
+	handlers []RouteRegistrar
+}
+
+// NewInternalHandler creates InternalHandler with route registrars.
+func NewInternalHandler(
+	handlers []RouteRegistrar,
+) *InternalHandler {
+	return &InternalHandler{
+		handlers: handlers,
+	}
+}
+
+// RegisterRoutes registers all routes under /internal/v1.
+func (handler *InternalHandler) RegisterRoutes(
+	router *gin.Engine,
+) {
+	internal := router.Group("/internal/v1")
+
+	for _, handlerItem := range handler.handlers {
+		handlerItem.RegisterRoutes(internal)
+	}
+}
+
