@@ -15,3 +15,9 @@ const (
 	HeaderServiceToken  = "X-Service-Token"
 	BearerPrefix        = "Bearer "
 )
+
+// Route group prefix constants.
+const (
+	RoutePrefixAPIV1      = "/api/v1"
+	RoutePrefixInternalV1 = "/internal/v1"
+)

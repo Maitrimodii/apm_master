@@ -10,68 +10,56 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// ServerParams bundles all dependencies and configuration for Server initialization.
+type ServerParams struct {
+	Config          *config.Config
+	Middlewares     []gin.HandlerFunc
+	APIHandler      *APIHandler
+	InternalHandler *InternalHandler
+	HealthChecker   *HealthChecker
+}
+
+// Server wraps the standard library http.Server and handles graceful lifecycles.
 type Server struct {
 	config     *config.Config
 	httpServer *http.Server
 }
 
-func NewServer(
-	cfg *config.Config,
-	middlewares []gin.HandlerFunc,
-	handler *APIHandler,
-	health *HealthChecker,
-	internalHandler ...*InternalHandler,
-) *Server {
-
+// NewServer initializes the Gin router, registers middleware, mounts health probes and API modules.
+func NewServer(params ServerParams) *Server {
 	router := gin.New()
 
-	for _, mw := range middlewares {
+	for _, mw := range params.Middlewares {
 		router.Use(mw)
 	}
 
-	// Liveness probe (HTTP server is running)
-	healthHandler := func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	// 1. Kubernetes & Infrastructure Health Probes (mounted at root and /api/v1 alias)
+	if params.HealthChecker != nil {
+		router.GET("/healthz", params.HealthChecker.LiveHandler)
+		router.GET("/readyz", params.HealthChecker.ReadyHandler)
+		router.GET(RoutePrefixAPIV1+"/healthz", params.HealthChecker.LiveHandler)
+		router.GET(RoutePrefixAPIV1+"/readyz", params.HealthChecker.ReadyHandler)
 	}
-	router.GET("/api/v1/healthz", healthHandler)
 
-	// Readiness probe (Dependencies are available)
-	readyHandler := func(c *gin.Context) {
-		if health == nil {
-			c.JSON(http.StatusOK, gin.H{"status": "ok", "note": "no readiness checker configured"})
-			return
-		}
-		report := health.Check(c.Request.Context())
-		status := http.StatusOK
-		if !report.OK {
-			status = http.StatusServiceUnavailable
-		}
-		c.JSON(status, report)
+	// 2. Public API V1 Modules
+	if params.APIHandler != nil {
+		params.APIHandler.RegisterRoutes(router)
 	}
-	router.GET("/api/v1/readyz", readyHandler)
 
-	// Ensure OPTIONS preflights never 404
-	router.OPTIONS("/*path", func(c *gin.Context) {
-		c.Status(http.StatusNoContent)
-	})
-
-	handler.RegisterRoutes(router)
-
-	for _, ih := range internalHandler {
-		if ih != nil {
-			ih.RegisterRoutes(router)
-		}
+	// 3. Internal Service-to-Service Modules
+	if params.InternalHandler != nil {
+		params.InternalHandler.RegisterRoutes(router)
 	}
 
 	return &Server{
-		config: cfg,
+		config: params.Config,
 		httpServer: &http.Server{
-			Addr:              fmt.Sprintf(":%s", cfg.HTTPPort),
+			Addr:              fmt.Sprintf(":%s", params.Config.HTTPPort),
 			Handler:           router,
-			ReadTimeout:       cfg.HTTPReadTimeout,
-			WriteTimeout:      cfg.HTTPWriteTimeout,
-			IdleTimeout:       cfg.HTTPIdleTimeout,
-			ReadHeaderTimeout: cfg.HTTPHeaderTimeout,
+			ReadTimeout:       params.Config.HTTPReadTimeout,
+			WriteTimeout:      params.Config.HTTPWriteTimeout,
+			IdleTimeout:       params.Config.HTTPIdleTimeout,
+			ReadHeaderTimeout: params.Config.HTTPHeaderTimeout,
 		},
 	}
 }
@@ -87,4 +75,3 @@ func (server *Server) Start() error {
 func (server *Server) Shutdown(ctx context.Context) error {
 	return server.httpServer.Shutdown(ctx)
 }
-

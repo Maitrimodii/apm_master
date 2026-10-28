@@ -130,24 +130,20 @@ func run() error {
 	}
 
 	apiHandler := server.NewAPIHandler(
-		[]server.RouteRegistrar{
-			identityModule,
-			ingestModule,
-			trace.NewModule(moduleDeps),
-			log.NewModule(moduleDeps),
-			metric.NewModule(moduleDeps),
-			alert.NewModule(
-				moduleDeps,
-				notificationService,
-			),
-			investigation.NewModule(moduleDeps),
-		},
+		identityModule,
+		ingestModule,
+		trace.NewModule(moduleDeps),
+		log.NewModule(moduleDeps),
+		metric.NewModule(moduleDeps),
+		alert.NewModule(
+			moduleDeps,
+			notificationService,
+		),
+		investigation.NewModule(moduleDeps),
 	)
 
 	internalHandler := server.NewInternalHandler(
-		[]server.RouteRegistrar{
-			investigation.NewInternalModule(moduleDeps, cfg),
-		},
+		investigation.NewInternalModule(moduleDeps, cfg),
 	)
 
 	middlewares := []gin.HandlerFunc{
@@ -161,13 +157,13 @@ func run() error {
 
 	healthChecker := server.NewHealthChecker(databaseInstance.Pool(), redisClient.Client)
 
-	srv := server.NewServer(
-		cfg,
-		middlewares,
-		apiHandler,
-		healthChecker,
-		internalHandler,
-	)
+	srv := server.NewServer(server.ServerParams{
+		Config:          cfg,
+		Middlewares:     middlewares,
+		APIHandler:      apiHandler,
+		InternalHandler: internalHandler,
+		HealthChecker:   healthChecker,
+	})
 
 	outboxPublisher := investigation.NewPublisher(databaseInstance.Pool(), invKafkaWriter, cfg, logger)
 	go outboxPublisher.Run(appCtx)

@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"net/http"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
@@ -59,4 +61,23 @@ func (h *HealthChecker) Check(ctx context.Context) HealthReport {
 
 	allOK := pgStatus.OK && redisStatus.OK
 	return HealthReport{OK: allOK, Components: components}
+}
+
+// LiveHandler serves Kubernetes liveness probes (HTTP server is alive).
+func (h *HealthChecker) LiveHandler(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// ReadyHandler serves Kubernetes readiness probes (all dependencies are healthy).
+func (h *HealthChecker) ReadyHandler(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "note": "no readiness checker configured"})
+		return
+	}
+	report := h.Check(c.Request.Context())
+	status := http.StatusOK
+	if !report.OK {
+		status = http.StatusServiceUnavailable
+	}
+	c.JSON(status, report)
 }
