@@ -17,6 +17,7 @@ import (
 	applogger "github.com/Maitrimodii/apm_master/internal/logger"
 	"github.com/Maitrimodii/apm_master/internal/metric"
 	"github.com/Maitrimodii/apm_master/internal/notification"
+	"github.com/Maitrimodii/apm_master/internal/retention"
 	"github.com/Maitrimodii/apm_master/internal/scheduler"
 	"github.com/Maitrimodii/apm_master/internal/trace"
 )
@@ -53,7 +54,7 @@ func run() error {
 	dbCtx, dbCancel := context.WithTimeout(context.Background(), cfg.PostgresTimeout)
 	defer dbCancel()
 
-	databaseInstance, err := database.Connect(dbCtx, cfg.GetPoolDSN())
+	databaseInstance, err := database.Connect(dbCtx, cfg.GetPoolDSN(), cfg.GetPoolConfig())
 	if err != nil {
 		return fmt.Errorf("connect postgres: %w", err)
 	}
@@ -83,6 +84,12 @@ func run() error {
 
 	if err := jobScheduler.Register(alertTask); err != nil {
 		return fmt.Errorf("failed to register alert task: %w", err)
+	}
+
+	retentionStore := retention.NewStore(databaseInstance.Pool())
+	retentionTask := retention.NewTask(retentionStore, cfg, logger)
+	if err := jobScheduler.Register(retentionTask); err != nil {
+		return fmt.Errorf("failed to register retention task: %w", err)
 	}
 
 	jobScheduler.Start(appCtx)

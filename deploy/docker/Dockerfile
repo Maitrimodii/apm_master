@@ -1,31 +1,52 @@
-# Build stage
-FROM golang:1.25-alpine AS builder
+# syntax=docker/dockerfile:1
+
+# ------------------------------------------------------------------------------
+# 1. Base Stage: Go toolchain & dependencies
+# ------------------------------------------------------------------------------
+FROM golang:1.24-alpine AS base
 
 WORKDIR /app
 
-# Install dependencies
+RUN apk add --no-cache git ca-certificates tzdata
+
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source code
 COPY . .
 
-# Build the applications
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o apm ./cmd/apm
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o scheduler ./cmd/scheduler
+# ------------------------------------------------------------------------------
+# 2. Test Stage: Automated testing in container
+# ------------------------------------------------------------------------------
+FROM base AS test
 
-# Final stage
-FROM alpine:latest
+CMD ["go", "test", "-v", "./..."]
+
+# ------------------------------------------------------------------------------
+# 3. Builder Stage: Compile static binaries
+# ------------------------------------------------------------------------------
+FROM base AS builder
+
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /bin/apm ./cmd/apm
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /bin/scheduler ./cmd/scheduler
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /bin/migrate ./cmd/migrate
+
+# ------------------------------------------------------------------------------
+# 4. Production Stage: Minimal, secure scratch/alpine container
+# ------------------------------------------------------------------------------
+FROM alpine:3.21 AS production
 
 WORKDIR /app
 
-# Copy the binaries and migrations
-COPY --from=builder /app/apm .
-COPY --from=builder /app/scheduler .
+RUN apk add --no-cache ca-certificates tzdata \
+    && addgroup -S appgroup && adduser -S appuser -G appgroup
+
+COPY --from=builder /bin/apm /bin/scheduler /bin/migrate ./
 COPY --from=builder /app/migrations ./migrations
 
-# Expose the API port
+RUN chown -R appuser:appgroup /app
+
+USER appuser
+
 EXPOSE 8080
 
-# Command to run the application
 CMD ["./apm"]

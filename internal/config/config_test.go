@@ -14,6 +14,10 @@ func TestLoadUsesConfiguredDurations(testRunner *testing.T) {
 	testRunner.Setenv("HTTP_HEADER_TIMEOUT_MS", "6000")
 	testRunner.Setenv("MAX_BODY_BYTES", "1048576")
 	testRunner.Setenv("POSTGRES_TIMEOUT_MS", "7000")
+	testRunner.Setenv("POSTGRES_MAX_CONNS", "25")
+	testRunner.Setenv("POSTGRES_MIN_CONNS", "3")
+	testRunner.Setenv("POSTGRES_MAX_CONN_IDLE_TIME_MS", "300000")
+	testRunner.Setenv("POSTGRES_MAX_CONN_LIFETIME_MS", "1800000")
 	testRunner.Setenv("REDIS_TIMEOUT_MS", "8000")
 	testRunner.Setenv("ACCESS_TOKEN_EXPIRY_MINS", "25")
 	testRunner.Setenv("REFRESH_TOKEN_EXPIRY_DAYS", "14")
@@ -66,6 +70,27 @@ func TestLoadUsesConfiguredDurations(testRunner *testing.T) {
 
 	if got := cfg.RedisTimeout; got != 8*time.Second {
 		testRunner.Fatalf("RedisTimeout = %v, want %v", got, 8*time.Second)
+	}
+
+	if got := cfg.PostgresMaxConns; got != 25 {
+		testRunner.Fatalf("PostgresMaxConns = %d, want 25", got)
+	}
+
+	if got := cfg.PostgresMinConns; got != 3 {
+		testRunner.Fatalf("PostgresMinConns = %d, want 3", got)
+	}
+
+	if got := cfg.PostgresMaxConnIdleTime; got != 5*time.Minute {
+		testRunner.Fatalf("PostgresMaxConnIdleTime = %v, want 5m", got)
+	}
+
+	if got := cfg.PostgresMaxConnLifetime; got != 30*time.Minute {
+		testRunner.Fatalf("PostgresMaxConnLifetime = %v, want 30m", got)
+	}
+
+	poolCfg := cfg.GetPoolConfig()
+	if poolCfg.MaxConns != 25 || poolCfg.MinConns != 3 {
+		testRunner.Fatalf("GetPoolConfig mismatch: %+v", poolCfg)
 	}
 
 	if got := cfg.AccessTokenDuration(); got != 25*time.Minute {
@@ -126,6 +151,23 @@ func TestValidateRejectsInvalidConfiguration(testRunner *testing.T) {
 		}
 	})
 
+	testRunner.Run("invalid postgres pool max conns", func(testRunner *testing.T) {
+		cfg := validConfig()
+		cfg.PostgresMaxConns = 0
+		if err := cfg.Validate(); err == nil {
+			testRunner.Fatal("expected error for PostgresMaxConns = 0")
+		}
+	})
+
+	testRunner.Run("invalid postgres pool min greater than max", func(testRunner *testing.T) {
+		cfg := validConfig()
+		cfg.PostgresMaxConns = 5
+		cfg.PostgresMinConns = 10
+		if err := cfg.Validate(); err == nil {
+			testRunner.Fatal("expected error for PostgresMinConns > PostgresMaxConns")
+		}
+	})
+
 	testRunner.Run("valid config", func(testRunner *testing.T) {
 		cfg := validConfig()
 		if err := cfg.Validate(); err != nil {
@@ -152,6 +194,10 @@ func validConfig() *Config {
 		PostgresPassword:            "super-secret-password",
 		PostgresDBName:              "apm_db",
 		PostgresTimeout:             5 * time.Second,
+		PostgresMaxConns:            50,
+		PostgresMinConns:            5,
+		PostgresMaxConnIdleTime:     15 * time.Minute,
+		PostgresMaxConnLifetime:     1 * time.Hour,
 		RedisTimeout:                5 * time.Second,
 		JWTSecret:                   "0123456789abcdef0123456789abcdef",
 		AccessTokenExpiryMins:       15,

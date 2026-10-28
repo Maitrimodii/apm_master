@@ -8,12 +8,51 @@ import (
 	"strings"
 )
 
-type contextKey string
+type ContextKey string
 
 const (
-	RequestIDKey contextKey = "request_id"
-	OrgIDKey     contextKey = "org_id"
+	RequestIDKey ContextKey = "request_id"
+	OrgIDKey     ContextKey = "org_id"
+	UserIDKey    ContextKey = "user_id"
 )
+
+// WithRequestID injects request_id into context using typed ContextKey.
+func WithRequestID(ctx context.Context, reqID string) context.Context {
+	return context.WithValue(ctx, RequestIDKey, reqID)
+}
+
+// WithOrgID injects org_id into context using typed ContextKey.
+func WithOrgID(ctx context.Context, orgID string) context.Context {
+	return context.WithValue(ctx, OrgIDKey, orgID)
+}
+
+// GetRequestID retrieves request_id checking typed ContextKey first, then string fallback.
+func GetRequestID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if v, ok := ctx.Value(RequestIDKey).(string); ok && v != "" {
+		return v
+	}
+	if v, ok := ctx.Value("request_id").(string); ok && v != "" {
+		return v
+	}
+	return ""
+}
+
+// GetOrgID retrieves org_id checking typed ContextKey first, then string fallback.
+func GetOrgID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if v, ok := ctx.Value(OrgIDKey).(string); ok && v != "" {
+		return v
+	}
+	if v, ok := ctx.Value("org_id").(string); ok && v != "" {
+		return v
+	}
+	return ""
+}
 
 // levelVar allows runtime level changes (e.g. via an admin endpoint).
 var levelVar = new(slog.LevelVar)
@@ -53,15 +92,10 @@ type ContextHandler struct {
 
 func (handler *ContextHandler) Handle(ctx context.Context, logRecord slog.Record) error {
 	if ctx != nil {
-		if reqID, exists := ctx.Value("request_id").(string); exists && reqID != "" {
-			logRecord.AddAttrs(slog.String("request_id", reqID))
-		} else if reqID, exists := ctx.Value(RequestIDKey).(string); exists && reqID != "" {
+		if reqID := GetRequestID(ctx); reqID != "" {
 			logRecord.AddAttrs(slog.String("request_id", reqID))
 		}
-
-		if orgID, exists := ctx.Value("org_id").(string); exists && orgID != "" {
-			logRecord.AddAttrs(slog.String("org_id", orgID))
-		} else if orgID, exists := ctx.Value(OrgIDKey).(string); exists && orgID != "" {
+		if orgID := GetOrgID(ctx); orgID != "" {
 			logRecord.AddAttrs(slog.String("org_id", orgID))
 		}
 	}

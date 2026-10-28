@@ -10,13 +10,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const (
-	MaxTimeWindow                 = 24 * time.Hour
-	MaxConcurrentPerTenantDefault = 5
-	DefaultPaginationLimit        = 20
-	MaxPaginationLimit            = 100
-)
-
 type Service struct {
 	store  *Store
 	logger *slog.Logger
@@ -49,13 +42,13 @@ func (s *Service) Create(
 	if req.TimeRangeStart != nil && !req.TimeRangeStart.IsZero() {
 		start = *req.TimeRangeStart
 	} else {
-		start = incidentContext.TriggeredAt.Add(-15 * time.Minute)
+		start = incidentContext.TriggeredAt.Add(-DefaultWindowPadding)
 	}
 
 	if req.TimeRangeEnd != nil && !req.TimeRangeEnd.IsZero() {
 		end = *req.TimeRangeEnd
 	} else {
-		end = incidentContext.TriggeredAt.Add(15 * time.Minute)
+		end = incidentContext.TriggeredAt.Add(DefaultWindowPadding)
 	}
 
 	if start.After(end) {

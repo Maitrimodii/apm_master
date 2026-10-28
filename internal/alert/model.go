@@ -61,15 +61,6 @@ type ShareAlertResponse struct {
 	Message string `json:"message"`
 }
 
-type AlertState string
-
-const (
-	AlertStatePending      AlertState = "PENDING"
-	AlertStateFiring       AlertState = "FIRING"
-	AlertStateAcknowledged AlertState = "ACKNOWLEDGED"
-	AlertStateResolved     AlertState = "RESOLVED"
-)
-
 // AlertInstance stores a firing incident for an alert definition.
 type AlertInstance struct {
 	ID               uuid.UUID

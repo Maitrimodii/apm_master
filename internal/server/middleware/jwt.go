@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/Maitrimodii/apm_master/internal/logger"
 	"github.com/Maitrimodii/apm_master/internal/server"
 	"github.com/gin-gonic/gin"
 )
@@ -16,7 +17,7 @@ type TokenParser interface {
 // JWTAuth validates JWT token on protected routes.
 func JWTAuth(parser TokenParser) gin.HandlerFunc {
 	return func(ginContext *gin.Context) {
-		authHeader := ginContext.GetHeader("Authorization")
+		authHeader := ginContext.GetHeader(server.HeaderAuthorization)
 		if authHeader == "" {
 			server.Handle(ginContext, server.Unauthorized(
 				server.CodeInvalidToken,
@@ -46,13 +47,15 @@ func JWTAuth(parser TokenParser) gin.HandlerFunc {
 			return
 		}
 
-		ginContext.Set("user_id", userID)
-		ginContext.Set("org_id", orgID)
-		ginContext.Set("email", email)
+		ginContext.Set(server.CtxKeyUserID, userID)
+		ginContext.Set(server.CtxKeyOrgID, orgID)
+		ginContext.Set(server.CtxKeyEmail, email)
 
 		ctx := ginContext.Request.Context()
-		ctx = context.WithValue(ctx, "user_id", userID)
-		ctx = context.WithValue(ctx, "org_id", orgID)
+		ctx = logger.WithOrgID(ctx, orgID)
+		ctx = context.WithValue(ctx, logger.UserIDKey, userID)
+		ctx = context.WithValue(ctx, server.CtxKeyUserID, userID)
+		ctx = context.WithValue(ctx, server.CtxKeyOrgID, orgID)
 		ginContext.Request = ginContext.Request.WithContext(ctx)
 
 		ginContext.Next()

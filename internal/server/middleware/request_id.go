@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 
+	"github.com/Maitrimodii/apm_master/internal/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -20,7 +21,9 @@ func RequestID() gin.HandlerFunc {
 		ginContext.Header(RequestIDHeader, requestID)
 		ginContext.Set("request_id", requestID)
 
-		ctx := context.WithValue(ginContext.Request.Context(), "request_id", requestID)
+		ctx := logger.WithRequestID(ginContext.Request.Context(), requestID)
+		// Maintain raw string key for third-party handler compatibility
+		ctx = context.WithValue(ctx, "request_id", requestID)
 		ginContext.Request = ginContext.Request.WithContext(ctx)
 
 		ginContext.Next()

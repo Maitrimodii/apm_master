@@ -68,7 +68,7 @@ func run() error {
 	dbCtx, dbCancel := context.WithTimeout(context.Background(), cfg.PostgresTimeout)
 	defer dbCancel()
 
-	databaseInstance, err := database.Connect(dbCtx, cfg.GetPoolDSN())
+	databaseInstance, err := database.Connect(dbCtx, cfg.GetPoolDSN(), cfg.GetPoolConfig())
 	if err != nil {
 		return fmt.Errorf("connect postgres: %w", err)
 	}

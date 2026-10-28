@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Maitrimodii/apm_master/internal/database"
 )
 
 const (
@@ -28,9 +30,13 @@ const (
 	envPostgresPort     = "POSTGRES_PORT"
 	envPostgresUser     = "POSTGRES_USER"
 	envPostgresPassword = "POSTGRES_PASSWORD"
-	envPostgresDBName   = "POSTGRES_DB"
-	envPostgresTimeout  = "POSTGRES_TIMEOUT_MS"
-	envRedisTimeout     = "REDIS_TIMEOUT_MS"
+	envPostgresDBName          = "POSTGRES_DB"
+	envPostgresTimeout         = "POSTGRES_TIMEOUT_MS"
+	envPostgresMaxConns        = "POSTGRES_MAX_CONNS"
+	envPostgresMinConns        = "POSTGRES_MIN_CONNS"
+	envPostgresMaxConnIdleTime = "POSTGRES_MAX_CONN_IDLE_TIME_MS"
+	envPostgresMaxConnLifetime = "POSTGRES_MAX_CONN_LIFETIME_MS"
+	envRedisTimeout            = "REDIS_TIMEOUT_MS"
 
 	envJWTSecret               = "JWT_SECRET"
 	envAccessTokenExpiryMins   = "ACCESS_TOKEN_EXPIRY_MINS"
@@ -103,9 +109,13 @@ const (
 	defaultPostgresPort      = "5432"
 	defaultPostgresUser      = "apm_user"
 	defaultPostgresPassword  = ""
-	defaultPostgresDBName    = "apm_db"
-	defaultPostgresTimeoutMS = 5000
-	defaultRedisTimeoutMS    = 5000
+	defaultPostgresDBName            = "apm_db"
+	defaultPostgresTimeoutMS         = 5000
+	defaultPostgresMaxConns          = 50
+	defaultPostgresMinConns          = 5
+	defaultPostgresMaxConnIdleTimeMS = 15 * 60 * 1000
+	defaultPostgresMaxConnLifetimeMS = 60 * 60 * 1000
+	defaultRedisTimeoutMS            = 5000
 
 	defaultJWTSecret               = ""
 	defaultAccessTokenExpiryMins   = 15
@@ -162,8 +172,94 @@ const (
 	defaultInvestigationOutboxBatchSize      = 50
 )
 
-// Config holds all configuration values for the application.
+// ServerConfig groups HTTP and operational service configuration.
+type ServerConfig struct {
+	AppURL            string
+	AppEnv            string
+	AppMode           string
+	LogLevel          string
+	HTTPPort          string
+	HTTPReadTimeout   time.Duration
+	HTTPWriteTimeout  time.Duration
+	HTTPIdleTimeout   time.Duration
+	HTTPHeaderTimeout time.Duration
+	MaxBodyBytes      int64
+	RateLimitLimit    float64
+	RateLimitBurst    int
+	RateLimitWindow   time.Duration
+}
+
+// DatabaseConfig groups PostgreSQL, TimescaleDB, and Redis storage settings.
+type DatabaseConfig struct {
+	PostgresHost            string
+	PostgresPort            string
+	PostgresUser            string
+	PostgresPassword        string
+	PostgresDBName          string
+	PostgresTimeout         time.Duration
+	PostgresMaxConns        int32
+	PostgresMinConns        int32
+	PostgresMaxConnIdleTime time.Duration
+	PostgresMaxConnLifetime time.Duration
+	RedisURL                string
+	RedisTimeout            time.Duration
+}
+
+// KafkaConfig groups Kafka ingestion and AI investigation messaging topics.
+type KafkaConfig struct {
+	Brokers                      string
+	ClientID                     string
+	ConsumerGroup                string
+	TracesTopic                  string
+	LogsTopic                    string
+	MetricsTopic                 string
+	TracesDLQTopic               string
+	LogsDLQTopic                 string
+	MetricsDLQTopic              string
+	TopicPartitions              int
+	TopicReplicationFactor       int
+	TopicRetention               time.Duration
+	Compression                  string
+	ProducerBatchSize            int
+	ProducerBatchBytes           int
+	ProducerBatchTimeout         time.Duration
+	ProducerWriteTimeout         time.Duration
+	ProducerRequiredAcks         int
+	ProducerMaxAttempts          int
+	ConsumerWorkers              int
+	ConsumerBatchRecords         int
+	ConsumerBatchBytes           int
+	ConsumerFlushInterval        time.Duration
+	ConsumerReadMaxBytes         int
+	ConsumerMaxAttempts          int
+	ConsumerRetryInitial         time.Duration
+	ConsumerRetryMax             time.Duration
+	AIInvestigationTopic         string
+	AIRetryTopic                 string
+	AIDLQTopic                   string
+	InvestigationOutboxPoll      time.Duration
+	InvestigationOutboxBatchSize int
+}
+
+// AuthConfig groups security tokens, passwords, and invite duration settings.
+type AuthConfig struct {
+	JWTSecret               string
+	AccessTokenExpiryMins   int
+	RefreshTokenExpiryDays  int
+	InviteExpiryDays        int
+	PasswordResetExpiryMins int
+	AIServiceToken          string
+}
+
+// Config holds all configuration values for the application, organizing them both
+// by domain-specific sub-configs and top-level fields for backwards compatibility.
 type Config struct {
+	// Domain-specific configurations
+	Server   ServerConfig
+	Database DatabaseConfig
+	Kafka    KafkaConfig
+	Auth     AuthConfig
+
 	AppUrl   string
 	AppEnv   string
 	AppMode  string
@@ -178,16 +274,18 @@ type Config struct {
 	MaxBodyBytes      int64
 
 	// Database settings
-	PostgresHost     string
-	RedisURL         string
-	PostgresPort     string
-	PostgresUser     string
-	PostgresPassword string
-	PostgresDBName   string
-	PostgresTimeout  time.Duration
-	RedisTimeout     time.Duration
-
-	//Redis settings
+	PostgresHost            string
+	RedisURL                string
+	PostgresPort            string
+	PostgresUser            string
+	PostgresPassword        string
+	PostgresDBName          string
+	PostgresTimeout         time.Duration
+	PostgresMaxConns        int32
+	PostgresMinConns        int32
+	PostgresMaxConnIdleTime time.Duration
+	PostgresMaxConnLifetime time.Duration
+	RedisTimeout            time.Duration
 
 	// Auth settings
 	JWTSecret               string
@@ -304,8 +402,13 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	return &Config{
-		AppUrl:   getEnv(envAppURL, defaultAppURL),
+	appURL := os.Getenv("APP_URL")
+	if appURL == "" {
+		appURL = getEnv(envAppURL, defaultAppURL)
+	}
+
+	cfg := &Config{
+		AppUrl:   appURL,
 		AppEnv:   getEnv(envAppEnv, defaultAppEnv),
 		AppMode:  getEnv(envAppMode, defaultAppMode),
 		LogLevel: getEnv(envLogLevel, defaultLogLevel),
@@ -322,9 +425,13 @@ func Load() (*Config, error) {
 		PostgresPort:     getEnv(envPostgresPort, defaultPostgresPort),
 		PostgresUser:     getEnv(envPostgresUser, defaultPostgresUser),
 		PostgresPassword: getEnv(envPostgresPassword, defaultPostgresPassword),
-		PostgresDBName:   getEnv(envPostgresDBName, defaultPostgresDBName),
-		PostgresTimeout:  getEnvDurationMS(envPostgresTimeout, defaultPostgresTimeoutMS),
-		RedisTimeout:     getEnvDurationMS(envRedisTimeout, defaultRedisTimeoutMS),
+		PostgresDBName:          getEnv(envPostgresDBName, defaultPostgresDBName),
+		PostgresTimeout:         getEnvDurationMS(envPostgresTimeout, defaultPostgresTimeoutMS),
+		PostgresMaxConns:        int32(getEnvInt(envPostgresMaxConns, defaultPostgresMaxConns)),
+		PostgresMinConns:        int32(getEnvInt(envPostgresMinConns, defaultPostgresMinConns)),
+		PostgresMaxConnIdleTime: getEnvDurationMS(envPostgresMaxConnIdleTime, defaultPostgresMaxConnIdleTimeMS),
+		PostgresMaxConnLifetime: getEnvDurationMS(envPostgresMaxConnLifetime, defaultPostgresMaxConnLifetimeMS),
+		RedisTimeout:            getEnvDurationMS(envRedisTimeout, defaultRedisTimeoutMS),
 
 		JWTSecret:               getEnv(envJWTSecret, defaultJWTSecret),
 		AccessTokenExpiryMins:   getEnvInt(envAccessTokenExpiryMins, defaultAccessTokenExpiryMins),
@@ -379,7 +486,84 @@ func Load() (*Config, error) {
 		AIServiceToken:                  getEnv(envAIServiceToken, defaultAIServiceToken),
 		InvestigationOutboxPollInterval: getEnvDurationMS(envInvestigationOutboxPollIntervalMS, defaultInvestigationOutboxPollIntervalMS),
 		InvestigationOutboxBatchSize:    getEnvInt(envInvestigationOutboxBatchSize, defaultInvestigationOutboxBatchSize),
-	}, nil
+	}
+
+	cfg.Server = ServerConfig{
+		AppURL:            cfg.AppUrl,
+		AppEnv:            cfg.AppEnv,
+		AppMode:           cfg.AppMode,
+		LogLevel:          cfg.LogLevel,
+		HTTPPort:          cfg.HTTPPort,
+		HTTPReadTimeout:   cfg.HTTPReadTimeout,
+		HTTPWriteTimeout:  cfg.HTTPWriteTimeout,
+		HTTPIdleTimeout:   cfg.HTTPIdleTimeout,
+		HTTPHeaderTimeout: cfg.HTTPHeaderTimeout,
+		MaxBodyBytes:      cfg.MaxBodyBytes,
+		RateLimitLimit:    cfg.RateLimitLimit,
+		RateLimitBurst:    cfg.RateLimitBurst,
+		RateLimitWindow:   cfg.RateLimitWindow,
+	}
+
+	cfg.Database = DatabaseConfig{
+		PostgresHost:            cfg.PostgresHost,
+		PostgresPort:            cfg.PostgresPort,
+		PostgresUser:            cfg.PostgresUser,
+		PostgresPassword:        cfg.PostgresPassword,
+		PostgresDBName:          cfg.PostgresDBName,
+		PostgresTimeout:         cfg.PostgresTimeout,
+		PostgresMaxConns:        cfg.PostgresMaxConns,
+		PostgresMinConns:        cfg.PostgresMinConns,
+		PostgresMaxConnIdleTime: cfg.PostgresMaxConnIdleTime,
+		PostgresMaxConnLifetime: cfg.PostgresMaxConnLifetime,
+		RedisURL:                cfg.RedisURL,
+		RedisTimeout:            cfg.RedisTimeout,
+	}
+
+	cfg.Kafka = KafkaConfig{
+		Brokers:                      cfg.KafkaBrokers,
+		ClientID:                     cfg.KafkaClientID,
+		ConsumerGroup:                cfg.KafkaConsumerGroup,
+		TracesTopic:                  cfg.KafkaTracesTopic,
+		LogsTopic:                    cfg.KafkaLogsTopic,
+		MetricsTopic:                 cfg.KafkaMetricsTopic,
+		TracesDLQTopic:               cfg.KafkaTracesDLQTopic,
+		LogsDLQTopic:                 cfg.KafkaLogsDLQTopic,
+		MetricsDLQTopic:              cfg.KafkaMetricsDLQTopic,
+		TopicPartitions:              cfg.KafkaTopicPartitions,
+		TopicReplicationFactor:       cfg.KafkaTopicReplicationFactor,
+		TopicRetention:               cfg.KafkaTopicRetention,
+		Compression:                  cfg.KafkaCompression,
+		ProducerBatchSize:            cfg.KafkaProducerBatchSize,
+		ProducerBatchBytes:           cfg.KafkaProducerBatchBytes,
+		ProducerBatchTimeout:         cfg.KafkaProducerBatchTimeout,
+		ProducerWriteTimeout:         cfg.KafkaProducerWriteTimeout,
+		ProducerRequiredAcks:         cfg.KafkaProducerRequiredAcks,
+		ProducerMaxAttempts:          cfg.KafkaProducerMaxAttempts,
+		ConsumerWorkers:              cfg.KafkaConsumerWorkers,
+		ConsumerBatchRecords:         cfg.KafkaConsumerBatchRecords,
+		ConsumerBatchBytes:           cfg.KafkaConsumerBatchBytes,
+		ConsumerFlushInterval:        cfg.KafkaConsumerFlushInterval,
+		ConsumerReadMaxBytes:         cfg.KafkaConsumerReadMaxBytes,
+		ConsumerMaxAttempts:          cfg.KafkaConsumerMaxAttempts,
+		ConsumerRetryInitial:         cfg.KafkaConsumerRetryInitial,
+		ConsumerRetryMax:             cfg.KafkaConsumerRetryMax,
+		AIInvestigationTopic:         cfg.KafkaAIInvestigationTopic,
+		AIRetryTopic:                 cfg.KafkaAIRetryTopic,
+		AIDLQTopic:                   cfg.KafkaAIDLQTopic,
+		InvestigationOutboxPoll:      cfg.InvestigationOutboxPollInterval,
+		InvestigationOutboxBatchSize: cfg.InvestigationOutboxBatchSize,
+	}
+
+	cfg.Auth = AuthConfig{
+		JWTSecret:               cfg.JWTSecret,
+		AccessTokenExpiryMins:   cfg.AccessTokenExpiryMins,
+		RefreshTokenExpiryDays:  cfg.RefreshTokenExpiryDays,
+		InviteExpiryDays:        cfg.InviteExpiryDays,
+		PasswordResetExpiryMins: cfg.PasswordResetExpiryMins,
+		AIServiceToken:          cfg.AIServiceToken,
+	}
+
+	return cfg, nil
 }
 
 // AccessTokenDuration returns the current access token lifespan.
@@ -424,6 +608,16 @@ func (config *Config) GetPoolDSN() string {
 	)
 }
 
+// GetPoolConfig returns a database.PoolConfig populated from database settings.
+func (config *Config) GetPoolConfig() database.PoolConfig {
+	return database.PoolConfig{
+		MaxConns:        config.Database.PostgresMaxConns,
+		MinConns:        config.Database.PostgresMinConns,
+		MaxConnIdleTime: config.Database.PostgresMaxConnIdleTime,
+		MaxConnLifetime: config.Database.PostgresMaxConnLifetime,
+	}
+}
+
 // getEnv reads an environment variable by key.
 // Returns the fallback value if the variable is not set.
 func getEnv(key, fallback string) string {
@@ -462,6 +656,11 @@ func (config *Config) Validate() error {
 		{config.PostgresUser != "", fmt.Errorf("POSTGRES_USER must be set")},
 		{config.PostgresDBName != "", fmt.Errorf("POSTGRES_DB must be set")},
 		{config.PostgresTimeout > 0, fmt.Errorf("POSTGRES_TIMEOUT_MS must be greater than 0")},
+		{config.PostgresMaxConns > 0, fmt.Errorf("POSTGRES_MAX_CONNS must be greater than 0")},
+		{config.PostgresMinConns >= 0, fmt.Errorf("POSTGRES_MIN_CONNS must be greater than or equal to 0")},
+		{config.PostgresMaxConns >= config.PostgresMinConns, fmt.Errorf("POSTGRES_MAX_CONNS must be greater than or equal to POSTGRES_MIN_CONNS")},
+		{config.PostgresMaxConnIdleTime > 0, fmt.Errorf("POSTGRES_MAX_CONN_IDLE_TIME_MS must be greater than 0")},
+		{config.PostgresMaxConnLifetime > 0, fmt.Errorf("POSTGRES_MAX_CONN_LIFETIME_MS must be greater than 0")},
 		{config.RedisTimeout > 0, fmt.Errorf("REDIS_TIMEOUT_MS must be greater than 0")},
 		{config.PostgresPassword != "", fmt.Errorf("POSTGRES_PASSWORD must be set")},
 
@@ -546,6 +745,11 @@ func (config *Config) ValidateScheduler() error {
 		{config.PostgresUser != "", fmt.Errorf("POSTGRES_USER must be set")},
 		{config.PostgresDBName != "", fmt.Errorf("POSTGRES_DB must be set")},
 		{config.PostgresTimeout > 0, fmt.Errorf("POSTGRES_TIMEOUT_MS must be greater than 0")},
+		{config.PostgresMaxConns > 0, fmt.Errorf("POSTGRES_MAX_CONNS must be greater than 0")},
+		{config.PostgresMinConns >= 0, fmt.Errorf("POSTGRES_MIN_CONNS must be greater than or equal to 0")},
+		{config.PostgresMaxConns >= config.PostgresMinConns, fmt.Errorf("POSTGRES_MAX_CONNS must be greater than or equal to POSTGRES_MIN_CONNS")},
+		{config.PostgresMaxConnIdleTime > 0, fmt.Errorf("POSTGRES_MAX_CONN_IDLE_TIME_MS must be greater than 0")},
+		{config.PostgresMaxConnLifetime > 0, fmt.Errorf("POSTGRES_MAX_CONN_LIFETIME_MS must be greater than 0")},
 		{config.RedisTimeout > 0, fmt.Errorf("REDIS_TIMEOUT_MS must be greater than 0")},
 		{config.PostgresPassword != "", fmt.Errorf("POSTGRES_PASSWORD must be set")},
 

@@ -40,7 +40,7 @@ func NewEvaluationTask(
 	if logger == nil {
 		logger = slog.Default()
 	}
-	interval := time.Minute
+	interval := DefaultEvaluationInterval
 	if cfg != nil && cfg.AlertEvaluationInterval > 0 {
 		interval = cfg.AlertEvaluationInterval
 	}
@@ -53,7 +53,7 @@ func NewEvaluationTask(
 		notification:    notificationService,
 		log:             logger,
 		interval:        interval,
-		advisoryLockKey: 0xA1A2A3A4,
+		advisoryLockKey: DefaultAdvisoryLockKey,
 	}
 }
 

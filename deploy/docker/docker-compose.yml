@@ -110,3 +110,27 @@ services:
       - .env.docker
     networks:
       - apm
+
+  test:
+    profiles: ["test"]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      target: test
+    networks:
+      - apm
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    env_file:
+      - .env.docker
+    environment:
+      APP_ENV: test
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis:6379
+      KAFKA_BROKERS: kafka:9092
+    command: ["go", "test", "-v", "./..."]

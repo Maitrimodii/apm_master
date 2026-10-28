@@ -94,7 +94,7 @@ func main() {
 		fmt.Println("==> Truncating telemetry tables (spans, logs, metrics)...")
 		dbCtx, dbCancel := context.WithTimeout(context.Background(), cfg.PostgresTimeout)
 		defer dbCancel()
-		pool, err := database.Connect(dbCtx, cfg.GetPoolDSN())
+		pool, err := database.Connect(dbCtx, cfg.GetPoolDSN(), cfg.GetPoolConfig())
 		if err != nil {
 			log.Fatalf("failed to connect to database: %v", err)
 		}
