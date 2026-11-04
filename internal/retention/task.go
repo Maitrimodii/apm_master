@@ -4,98 +4,96 @@ import (
 	"context"
 	"log/slog"
 	"time"
-
-	"github.com/Maitrimodii/apm_master/internal/config"
 )
 
+const (
+	// DefaultInterval is how often retention runs.
+	DefaultInterval = 24 * time.Hour
+	// deleteBatchSize rows are deleted per statement.
+	deleteBatchSize = 5000
+	// batchPause yields to other queries between delete batches.
+	batchPause = 100 * time.Millisecond
+)
+
+// Policy deletes rows of Table whose TimeColumn is older than RetentionDays.
+// A zero or negative RetentionDays disables the policy.
 type Policy struct {
-	Table       string
-	TimeColumn  string
+	Table         string
+	TimeColumn    string
 	RetentionDays int
 }
 
+// DefaultPolicies covers the tables Timescale retention does not: telemetry
+// hypertables expire through their own retention policies (migration 000009).
+func DefaultPolicies(notificationDays, refreshTokenDays int) []Policy {
+	return []Policy{
+		{Table: "notification_jobs", TimeColumn: "created_at", RetentionDays: notificationDays},
+		{Table: "notification_events", TimeColumn: "created_at", RetentionDays: notificationDays},
+		{Table: "refresh_tokens", TimeColumn: "expires_at", RetentionDays: refreshTokenDays},
+	}
+}
+
+// LockFunc runs fn while holding a cluster-wide lock and reports whether it ran.
+type LockFunc func(ctx context.Context, fn func(ctx context.Context) error) (bool, error)
+
+type deleter interface {
+	DeleteOldRecords(ctx context.Context, table, timeCol string, days, batchSize int) (int64, error)
+}
+
+// Task deletes expired rows. It implements scheduler.Task.
 type Task struct {
-	store    *Store
-	log      *slog.Logger
-	interval time.Duration
+	store    deleter
 	policies []Policy
-	lockKey  int64
+	lock     LockFunc
+	interval time.Duration
+	log      *slog.Logger
 }
 
-func NewTask(store *Store, cfg *config.Config, logger *slog.Logger) *Task {
-	if logger == nil {
-		logger = slog.Default()
+// NewTask creates the retention task. lock may be nil to skip cluster locking.
+func NewTask(store deleter, policies []Policy, lock LockFunc, log *slog.Logger) *Task {
+	if log == nil {
+		log = slog.Default()
 	}
-
-	return &Task{
-		store:    store,
-		log:      logger,
-		interval: 24 * time.Hour, // Run once a day
-		lockKey:  0xB1B2B3B4,
-		policies: []Policy{
-			{
-				Table:       "notification_jobs",
-				TimeColumn:  "created_at",
-				RetentionDays: cfg.NotificationRetentionDays,
-			},
-			{
-				Table:       "notification_events",
-				TimeColumn:  "created_at",
-				RetentionDays: cfg.NotificationRetentionDays,
-			},
-			{
-				Table:       "refresh_tokens",
-				TimeColumn:  "expires_at",
-				RetentionDays: cfg.RefreshTokenRetentionDays,
-			},
-		},
-	}
+	return &Task{store: store, policies: policies, lock: lock, interval: DefaultInterval, log: log}
 }
 
-func (t *Task) Name() string {
-	return "data_retention"
-}
-
-func (t *Task) Interval() time.Duration {
-	return t.interval
-}
+func (t *Task) Name() string            { return "data_retention" }
+func (t *Task) Interval() time.Duration { return t.interval }
 
 func (t *Task) Execute(ctx context.Context) error {
-	acquired, err := t.store.AcquireLock(ctx, t.lockKey)
-	if err != nil || !acquired {
-		t.log.Debug("retention task skipped, lock held by another instance or error", "error", err)
-		return nil
+	if t.lock == nil {
+		return t.run(ctx)
 	}
-	defer t.store.ReleaseLock(ctx, t.lockKey)
+	ran, err := t.lock(ctx, t.run)
+	if !ran && err == nil {
+		t.log.DebugContext(ctx, "retention skipped, another instance holds the lock")
+	}
+	return err
+}
 
-	t.log.Info("starting retention cleanup")
-
-	for _, policy := range t.policies {
-		if policy.RetentionDays <= 0 {
-			continue // disabled
+func (t *Task) run(ctx context.Context) error {
+	for _, p := range t.policies {
+		if p.RetentionDays <= 0 {
+			continue
 		}
-
-		totalDeleted := int64(0)
-		batchSize := 5000
-
+		var total int64
 		for {
-			deleted, err := t.store.DeleteOldRecords(ctx, policy.Table, policy.TimeColumn, policy.RetentionDays, batchSize)
+			deleted, err := t.store.DeleteOldRecords(ctx, p.Table, p.TimeColumn, p.RetentionDays, deleteBatchSize)
 			if err != nil {
-				t.log.Error("failed to delete old records", "table", policy.Table, "error", err)
+				t.log.ErrorContext(ctx, "retention delete failed", "table", p.Table, "error", err)
 				break
 			}
-			
-			totalDeleted += deleted
-			if deleted < int64(batchSize) {
-				break // No more rows to delete
+			total += deleted
+			if deleted < deleteBatchSize {
+				break
 			}
-			
-			// Small sleep to yield to other queries
-			time.Sleep(100 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(batchPause):
+			}
 		}
-		
-		t.log.Info("retention cleanup completed for table", "table", policy.Table, "deleted_rows", totalDeleted)
+		t.log.InfoContext(ctx, "retention cleanup completed", "table", p.Table, "deleted_rows", total)
 	}
-
 	return nil
 }

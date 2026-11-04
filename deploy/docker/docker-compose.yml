@@ -73,6 +73,22 @@ services:
       timeout: 3s
       retries: 5
 
+  # Applies migrations once before the API and scheduler start. The services
+  # themselves only auto-migrate when APP_ENV=development.
+  apm-migrate:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: apm-migrate
+    command: ["./migrate", "-action", "up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env.docker
+    networks:
+      - apm
+
   apm-api:
     build:
       context: ../..
@@ -82,6 +98,8 @@ services:
     environment:
       APP_MODE: "api"
     depends_on:
+      apm-migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -101,7 +119,11 @@ services:
       dockerfile: deploy/docker/Dockerfile
     container_name: apm-scheduler
     command: ["./scheduler"]
+    environment:
+      APP_MODE: "scheduler"
     depends_on:
+      apm-migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:

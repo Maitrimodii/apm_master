@@ -3,15 +3,14 @@ package alert
 import "time"
 
 const (
-	// DefaultEvaluationInterval is the fallback period for evaluating alert conditions.
+	// DefaultEvaluationInterval applies when ALERT_EVALUATION_INTERVAL_MS is unset.
 	DefaultEvaluationInterval = time.Minute
-
-	// DefaultAdvisoryLockKey is the PostgreSQL advisory lock key for alert evaluation task clustering.
-	DefaultAdvisoryLockKey = int64(0xA1A2A3A4)
-
-	// DefaultPendingDuration is the time an alert must continuously meet firing condition before transitioning from PENDING to FIRING.
-	DefaultPendingDuration = 2 * time.Minute
-
-	// DefaultQueryLimit is the standard record limit when listing alert instances.
-	DefaultQueryLimit = 50
+	// evaluationTimeout bounds the telemetry queries for one alert.
+	evaluationTimeout = 10 * time.Second
+	// enabledAlertsPageSize is how many alerts one evaluation query loads.
+	enabledAlertsPageSize = 500
+	// defaultPageSize is the list page size for alerts and instances.
+	defaultPageSize = 20
+	// adminRoleName is notified when an alert has no notification roles.
+	adminRoleName = "admin"
 )

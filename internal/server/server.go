@@ -3,16 +3,16 @@ package server
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 
-	"github.com/Maitrimodii/apm_master/internal/config"
 	"github.com/gin-gonic/gin"
+
+	"github.com/Maitrimodii/apm_master/internal/config"
 )
 
 // ServerParams bundles all dependencies and configuration for Server initialization.
 type ServerParams struct {
-	Config          *config.Config
+	HTTP            config.HTTPConfig
 	Middlewares     []gin.HandlerFunc
 	APIHandler      *APIHandler
 	InternalHandler *InternalHandler
@@ -21,7 +21,6 @@ type ServerParams struct {
 
 // Server wraps the standard library http.Server and handles graceful lifecycles.
 type Server struct {
-	config     *config.Config
 	httpServer *http.Server
 }
 
@@ -52,26 +51,25 @@ func NewServer(params ServerParams) *Server {
 	}
 
 	return &Server{
-		config: params.Config,
 		httpServer: &http.Server{
-			Addr:              fmt.Sprintf(":%s", params.Config.HTTPPort),
+			Addr:              ":" + params.HTTP.Port,
 			Handler:           router,
-			ReadTimeout:       params.Config.HTTPReadTimeout,
-			WriteTimeout:      params.Config.HTTPWriteTimeout,
-			IdleTimeout:       params.Config.HTTPIdleTimeout,
-			ReadHeaderTimeout: params.Config.HTTPHeaderTimeout,
+			ReadTimeout:       params.HTTP.ReadTimeout,
+			WriteTimeout:      params.HTTP.WriteTimeout,
+			IdleTimeout:       params.HTTP.IdleTimeout,
+			ReadHeaderTimeout: params.HTTP.HeaderTimeout,
 		},
 	}
 }
 
-func (server *Server) Start() error {
-	if err := server.httpServer.ListenAndServe(); err != nil &&
+func (s *Server) Start() error {
+	if err := s.httpServer.ListenAndServe(); err != nil &&
 		!errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
 }
 
-func (server *Server) Shutdown(ctx context.Context) error {
-	return server.httpServer.Shutdown(ctx)
+func (s *Server) Shutdown(ctx context.Context) error {
+	return s.httpServer.Shutdown(ctx)
 }

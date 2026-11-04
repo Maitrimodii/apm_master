@@ -1,35 +1,24 @@
 package investigation
 
 import (
-	"log/slog"
-
-	"github.com/Maitrimodii/apm_master/internal/config"
-	"github.com/Maitrimodii/apm_master/internal/log"
-	"github.com/Maitrimodii/apm_master/internal/metric"
+	"github.com/Maitrimodii/apm_master/internal/investigation/evidence"
+	"github.com/Maitrimodii/apm_master/internal/platform/module"
 	"github.com/Maitrimodii/apm_master/internal/server"
-	"github.com/Maitrimodii/apm_master/internal/server/middleware"
-	"github.com/Maitrimodii/apm_master/internal/trace"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// NewModule creates the public investigation route registrar (mounted under /api/v1).
-func NewModule(deps middleware.CommonModuleDeps) server.RouteRegistrar {
-	store := NewStore(deps.DB)
-	service := NewService(store, deps.Logger)
-	return NewHandler(service, deps.PermissionChecker, deps.TokenParser)
+// NewModule creates the public investigation API (mounted under /api/v1).
+func NewModule(deps module.Deps, incidents IncidentReader) server.RouteRegistrar {
+	service := NewService(NewStore(deps.DB), incidents, deps.Logger)
+	return NewHandler(service, deps.PermissionChecker, deps.TokenParser, deps.RateLimit)
 }
 
-// NewInternalModule creates the internal evidence route registrar (mounted under /internal/v1).
-func NewInternalModule(deps middleware.CommonModuleDeps, cfg *config.Config) server.RouteRegistrar {
+// NewInternalModule creates the service-to-service API used by
+// apm-ai-service (mounted under /internal/v1).
+func NewInternalModule(deps module.Deps, incidents IncidentReader, readers evidence.Readers, serviceToken string) server.RouteRegistrar {
 	store := NewStore(deps.DB)
-	metricStore := metric.NewStore(deps.DB)
-	traceStore := trace.NewStore(deps.DB)
-	logStore := log.NewStore(deps.DB)
-
-	return NewEvidenceHandler(store, metricStore, traceStore, logStore, cfg, deps.Logger)
-}
-
-// NewPublisher returns an initialized OutboxPublisher.
-func NewPublisher(pool *pgxpool.Pool, writer KafkaWriter, cfg *config.Config, log *slog.Logger) *OutboxPublisher {
-	return NewOutboxPublisher(pool, writer, cfg, log)
+	return NewInternalHandler(
+		NewService(store, incidents, deps.Logger),
+		NewEvidenceService(store, evidence.NewRegistry(readers), deps.Logger),
+		serviceToken,
+	)
 }

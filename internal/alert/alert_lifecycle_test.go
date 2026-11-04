@@ -7,12 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Maitrimodii/apm_master/internal/database"
-	"github.com/Maitrimodii/apm_master/internal/ingest/writer"
-	"github.com/Maitrimodii/apm_master/internal/metric"
-	"github.com/Maitrimodii/apm_master/internal/notification"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Maitrimodii/apm_master/internal/ingest/writer"
+	"github.com/Maitrimodii/apm_master/internal/metrics"
+	"github.com/Maitrimodii/apm_master/internal/notification"
+	"github.com/Maitrimodii/apm_master/internal/platform/pg"
 )
 
 const integrationDSNEnv = "APM_INTEGRATION_DSN"
@@ -29,7 +30,7 @@ func testPool(testRunner *testing.T) *pgxpool.Pool {
 	defer cancel()
 
 	// Apply migrations
-	if err := database.Migrate(dsn, "../../migrations"); err != nil {
+	if err := pg.Migrate(dsn, "../../migrations"); err != nil {
 		testRunner.Fatalf("db.Migrate() error = %v", err)
 	}
 
@@ -94,9 +95,9 @@ func TestAlertLifecycleTransitions(testRunner *testing.T) {
 	}
 
 	// 3. Initialize services
-	notificationService := notification.NewService(pool, nil, nil)
-	metricsStore := metric.NewStore(pool)
-	evaluationTask := NewEvaluationTask(store, metricsStore, nil, nil, notificationService, nil, nil)
+	notificationService := newTestNotificationService(pool)
+	metricsStore := metrics.NewStore(pool)
+	evaluationTask := NewEvaluationTask(EvaluationTaskDeps{Store: store, Metrics: metricsStore, Notifier: notificationService})
 	service := NewService(store, notificationService, nil)
 
 	// --- STEP 1: OK -> FIRING ---
@@ -104,12 +105,12 @@ func TestAlertLifecycleTransitions(testRunner *testing.T) {
 	_, _ = pool.Exec(ctx, "DELETE FROM metrics WHERE org_id = $1", orgID)
 	metricWriter := writer.NewMetricWriter(pool)
 	now := time.Now().UTC()
-	err = metricWriter.BulkInsert(ctx, []metric.WriteBatch{{
-		Metrics: []metric.Metric{{
+	err = metricWriter.BulkInsert(ctx, []metrics.WriteBatch{{
+		Metrics: []metrics.Metric{{
 			Time:       now.Add(-time.Second),
 			OrgID:      orgID,
 			MetricName: "cpu_usage",
-			MetricType: metric.MetricTypeGauge,
+			MetricType: metrics.MetricTypeGauge,
 			Value:      95,
 			Labels:     map[string]any{"service.name": "checkout"},
 		}},
@@ -118,13 +119,11 @@ func TestAlertLifecycleTransitions(testRunner *testing.T) {
 		testRunner.Fatalf("failed to insert firing metric: %v", err)
 	}
 
-	// Run evaluation
-	err = evaluationTask.evaluateAlert(ctx, *alert)
-	if err != nil {
-		testRunner.Fatalf("evaluateAlert failed: %v", err)
-	}
+	// First breach opens a PENDING instance; it fires once the breach has
+	// lasted the condition window.
+	evaluateUntilFiring(testRunner, ctx, pool, evaluationTask, store, *alert)
 
-	// Verify alert instance created in FIRING state
+	// Verify alert instance is FIRING
 	instance, err := store.GetActiveInstance(ctx, alert.ID)
 	if err != nil {
 		testRunner.Fatalf("GetActiveInstance failed: %v", err)
@@ -132,7 +131,7 @@ func TestAlertLifecycleTransitions(testRunner *testing.T) {
 	if instance == nil {
 		testRunner.Fatal("expected active alert instance to be created")
 	}
-	if instance.State != string(AlertStateFiring) {
+	if instance.State != AlertStateFiring {
 		testRunner.Fatalf("expected alert state FIRING, got %s", instance.State)
 	}
 	if instance.TriggeredAt.IsZero() {
@@ -187,7 +186,7 @@ func TestAlertLifecycleTransitions(testRunner *testing.T) {
 	if err != nil {
 		testRunner.Fatalf("Acknowledge service failed: %v", err)
 	}
-	if acknowledgedResp.State != string(AlertStateAcknowledged) {
+	if acknowledgedResp.State != AlertStateAcknowledged {
 		testRunner.Fatalf("expected state ACKNOWLEDGED, got %s", acknowledgedResp.State)
 	}
 	if acknowledgedResp.AcknowledgedAt == nil {
@@ -202,7 +201,7 @@ func TestAlertLifecycleTransitions(testRunner *testing.T) {
 	if instance == nil {
 		testRunner.Fatal("expected active alert instance to exist")
 	}
-	if instance.State != string(AlertStateAcknowledged) {
+	if instance.State != AlertStateAcknowledged {
 		testRunner.Fatalf("expected state to be ACKNOWLEDGED in DB, got %s", instance.State)
 	}
 	if instance.AcknowledgedAt == nil || instance.AcknowledgedAt.IsZero() {
@@ -242,7 +241,7 @@ func TestAlertLifecycleTransitions(testRunner *testing.T) {
 	if instance == nil {
 		testRunner.Fatal("expected active alert instance to exist")
 	}
-	if instance.State != string(AlertStateAcknowledged) {
+	if instance.State != AlertStateAcknowledged {
 		testRunner.Fatalf("expected active instance to still be ACKNOWLEDGED, got %s", instance.State)
 	}
 
@@ -258,12 +257,12 @@ func TestAlertLifecycleTransitions(testRunner *testing.T) {
 	// --- STEP 5: ACKNOWLEDGED -> RESOLVED (On Recovery) ---
 	// Clean metrics table and insert metric below threshold (10) to simulate recovery
 	_, _ = pool.Exec(ctx, "DELETE FROM metrics WHERE org_id = $1", orgID)
-	err = metricWriter.BulkInsert(ctx, []metric.WriteBatch{{
-		Metrics: []metric.Metric{{
+	err = metricWriter.BulkInsert(ctx, []metrics.WriteBatch{{
+		Metrics: []metrics.Metric{{
 			Time:       time.Now().UTC(),
 			OrgID:      orgID,
 			MetricName: "cpu_usage",
-			MetricType: metric.MetricTypeGauge,
+			MetricType: metrics.MetricTypeGauge,
 			Value:      10,
 			Labels:     map[string]any{"service.name": "checkout"},
 		}},
@@ -288,14 +287,14 @@ func TestAlertLifecycleTransitions(testRunner *testing.T) {
 	}
 
 	// Verify resolved_at and acknowledged_at are saved on the instance in table
-	var resolvedState string
+	var resolvedState AlertState
 	var ackedAt, resolvedAt *time.Time
 	err = pool.QueryRow(ctx, "SELECT state, acknowledged_at, resolved_at FROM alert_instances WHERE alert_id = $1 ORDER BY triggered_at DESC LIMIT 1", alert.ID).
 		Scan(&resolvedState, &ackedAt, &resolvedAt)
 	if err != nil {
 		testRunner.Fatalf("query alert_instances details: %v", err)
 	}
-	if resolvedState != string(AlertStateResolved) {
+	if resolvedState != AlertStateResolved {
 		testRunner.Fatalf("expected resolved state to be RESOLVED, got %s", resolvedState)
 	}
 	if ackedAt == nil {
@@ -326,12 +325,12 @@ func TestAlertLifecycleTransitions(testRunner *testing.T) {
 	// --- STEP 6: RESOLVED -> FIRING (Re-trigger) ---
 	// Clean metrics table and insert metric above threshold again (99)
 	_, _ = pool.Exec(ctx, "DELETE FROM metrics WHERE org_id = $1", orgID)
-	err = metricWriter.BulkInsert(ctx, []metric.WriteBatch{{
-		Metrics: []metric.Metric{{
+	err = metricWriter.BulkInsert(ctx, []metrics.WriteBatch{{
+		Metrics: []metrics.Metric{{
 			Time:       time.Now().UTC(),
 			OrgID:      orgID,
 			MetricName: "cpu_usage",
-			MetricType: metric.MetricTypeGauge,
+			MetricType: metrics.MetricTypeGauge,
 			Value:      99,
 			Labels:     map[string]any{"service.name": "checkout"},
 		}},
@@ -340,11 +339,8 @@ func TestAlertLifecycleTransitions(testRunner *testing.T) {
 		testRunner.Fatalf("failed to insert firing metric: %v", err)
 	}
 
-	// Run evaluation
-	err = evaluationTask.evaluateAlert(ctx, *alert)
-	if err != nil {
-		testRunner.Fatalf("evaluateAlert failed: %v", err)
-	}
+	// A new breach opens a new PENDING instance, which fires after the window.
+	evaluateUntilFiring(testRunner, ctx, pool, evaluationTask, store, *alert)
 
 	// Verify a new active instance is created in FIRING state
 	instance, err = store.GetActiveInstance(ctx, alert.ID)
@@ -354,7 +350,7 @@ func TestAlertLifecycleTransitions(testRunner *testing.T) {
 	if instance == nil {
 		testRunner.Fatal("expected new active instance to be created on re-fire")
 	}
-	if instance.State != string(AlertStateFiring) {
+	if instance.State != AlertStateFiring {
 		testRunner.Fatalf("expected active alert instance to return to FIRING, got %s", instance.State)
 	}
 	if instance.AcknowledgedAt != nil {
@@ -417,19 +413,19 @@ func TestAlertLifecycleFiringToResolvedDirectly(testRunner *testing.T) {
 		testRunner.Fatalf("failed to create alert definition: %v", err)
 	}
 
-	notificationService := notification.NewService(pool, nil, nil)
-	metricsStore := metric.NewStore(pool)
-	evaluationTask := NewEvaluationTask(store, metricsStore, nil, nil, notificationService, nil, nil)
+	notificationService := newTestNotificationService(pool)
+	metricsStore := metrics.NewStore(pool)
+	evaluationTask := NewEvaluationTask(EvaluationTaskDeps{Store: store, Metrics: metricsStore, Notifier: notificationService})
 
 	// Clean metrics table and write firing metric
 	_, _ = pool.Exec(ctx, "DELETE FROM metrics WHERE org_id = $1", orgID)
 	metricWriter := writer.NewMetricWriter(pool)
-	err = metricWriter.BulkInsert(ctx, []metric.WriteBatch{{
-		Metrics: []metric.Metric{{
+	err = metricWriter.BulkInsert(ctx, []metrics.WriteBatch{{
+		Metrics: []metrics.Metric{{
 			Time:       time.Now().UTC(),
 			OrgID:      orgID,
 			MetricName: "cpu_usage",
-			MetricType: metric.MetricTypeGauge,
+			MetricType: metrics.MetricTypeGauge,
 			Value:      95,
 			Labels:     map[string]any{"service.name": "checkout"},
 		}},
@@ -438,28 +434,25 @@ func TestAlertLifecycleFiringToResolvedDirectly(testRunner *testing.T) {
 		testRunner.Fatalf("failed to insert metric: %v", err)
 	}
 
-	// Evaluate -> FIRING
-	err = evaluationTask.evaluateAlert(ctx, *alert)
-	if err != nil {
-		testRunner.Fatalf("evaluateAlert failed: %v", err)
-	}
+	// Evaluate -> PENDING -> FIRING
+	evaluateUntilFiring(testRunner, ctx, pool, evaluationTask, store, *alert)
 
 	instance, err := store.GetActiveInstance(ctx, alert.ID)
 	if err != nil {
 		testRunner.Fatalf("GetActiveInstance failed: %v", err)
 	}
-	if instance == nil || instance.State != string(AlertStateFiring) {
+	if instance == nil || instance.State != AlertStateFiring {
 		testRunner.Fatalf("expected active alert instance in FIRING state, got: %v", instance)
 	}
 
 	// Clean metrics table and write recovery metric
 	_, _ = pool.Exec(ctx, "DELETE FROM metrics WHERE org_id = $1", orgID)
-	err = metricWriter.BulkInsert(ctx, []metric.WriteBatch{{
-		Metrics: []metric.Metric{{
+	err = metricWriter.BulkInsert(ctx, []metrics.WriteBatch{{
+		Metrics: []metrics.Metric{{
 			Time:       time.Now().UTC(),
 			OrgID:      orgID,
 			MetricName: "cpu_usage",
-			MetricType: metric.MetricTypeGauge,
+			MetricType: metrics.MetricTypeGauge,
 			Value:      20,
 			Labels:     map[string]any{"service.name": "checkout"},
 		}},
@@ -483,14 +476,14 @@ func TestAlertLifecycleFiringToResolvedDirectly(testRunner *testing.T) {
 	}
 
 	// Check DB
-	var resolvedState string
+	var resolvedState AlertState
 	var ackedAt, resolvedAt *time.Time
 	err = pool.QueryRow(ctx, "SELECT state, acknowledged_at, resolved_at FROM alert_instances WHERE alert_id = $1 ORDER BY triggered_at DESC LIMIT 1", alert.ID).
 		Scan(&resolvedState, &ackedAt, &resolvedAt)
 	if err != nil {
 		testRunner.Fatalf("query details failed: %v", err)
 	}
-	if resolvedState != string(AlertStateResolved) {
+	if resolvedState != AlertStateResolved {
 		testRunner.Fatalf("expected state RESOLVED, got %s", resolvedState)
 	}
 	if ackedAt != nil {
@@ -589,7 +582,7 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	inst1 := AlertInstance{
 		ID:              uuid.New(),
 		AlertID:         alertA1.ID,
-		State:           string(AlertStateFiring),
+		State:           AlertStateFiring,
 		TriggeredAt:     now.Add(-2 * time.Hour),
 		LastEvaluatedAt: now.Add(-2 * time.Hour),
 		Value:           95.5,
@@ -603,7 +596,7 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	inst2 := AlertInstance{
 		ID:              uuid.New(),
 		AlertID:         alertA2.ID,
-		State:           string(AlertStateAcknowledged),
+		State:           AlertStateAcknowledged,
 		TriggeredAt:     time.Now().Add(-10 * time.Minute),
 		LastEvaluatedAt: now.Add(-1 * time.Hour),
 		AcknowledgedAt:  &now,
@@ -619,7 +612,7 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	inst3 := AlertInstance{
 		ID:              uuid.New(),
 		AlertID:         alertA1.ID,
-		State:           string(AlertStateResolved),
+		State:           AlertStateResolved,
 		TriggeredAt:     time.Now().Add(-20 * time.Minute),
 		LastEvaluatedAt: now.Add(-10 * time.Minute),
 		ResolvedAt:      &resolvedTime,
@@ -634,7 +627,7 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	instB := AlertInstance{
 		ID:              uuid.New(),
 		AlertID:         alertB1.ID,
-		State:           string(AlertStateFiring),
+		State:           AlertStateFiring,
 		TriggeredAt:     time.Now().Add(-5 * time.Minute),
 		LastEvaluatedAt: now.Add(-5 * time.Minute),
 		Value:           92.0,
@@ -649,7 +642,7 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 
 	// --- Test Listing for Org A ---
 	// 1. List all - should return inst3, inst2, inst1 (in that order of triggered_at DESC)
-	res, total, err := service.ListInstances(ctx, orgA, "", "", uuid.Nil, nil, nil, 1, 10)
+	res, total, err := service.ListInstances(ctx, InstanceFilter{OrgID: orgA, State: AlertState(""), Severity: Severity(""), AlertID: uuid.Nil, From: nil, To: nil, Limit: 10, Offset: 0})
 	if err != nil {
 		testRunner.Fatalf("ListInstances failed: %v", err)
 	}
@@ -659,12 +652,15 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	if len(res) != 3 {
 		testRunner.Fatalf("expected length of result to be 3, got %d", len(res))
 	}
-	if res[0].ID != inst3.ID || res[1].ID != inst2.ID || res[2].ID != inst1.ID {
+	if res[0].ID != inst2.ID || res[1].ID != inst3.ID || res[2].ID != inst1.ID { // -10m, -20m, -2h
 		testRunner.Fatal("ordering of list instances is incorrect, should be triggered_at DESC")
+	}
+	if res[0].AlertName == "" || res[0].Severity == "" {
+		testRunner.Fatalf("list item lacks alert name/severity: %+v", res[0])
 	}
 
 	// 2. Filter state=FIRING
-	res, total, err = service.ListInstances(ctx, orgA, string(AlertStateFiring), "", uuid.Nil, nil, nil, 1, 10)
+	res, total, err = service.ListInstances(ctx, InstanceFilter{OrgID: orgA, State: AlertState(AlertStateFiring), Severity: Severity(""), AlertID: uuid.Nil, From: nil, To: nil, Limit: 10, Offset: 0})
 	if err != nil {
 		testRunner.Fatalf("ListInstances with state filter failed: %v", err)
 	}
@@ -673,7 +669,7 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	}
 
 	// 3. Filter state=ACKNOWLEDGED
-	res, total, err = service.ListInstances(ctx, orgA, string(AlertStateAcknowledged), "", uuid.Nil, nil, nil, 1, 10)
+	res, total, err = service.ListInstances(ctx, InstanceFilter{OrgID: orgA, State: AlertState(AlertStateAcknowledged), Severity: Severity(""), AlertID: uuid.Nil, From: nil, To: nil, Limit: 10, Offset: 0})
 	if err != nil {
 		testRunner.Fatalf("ListInstances with state filter failed: %v", err)
 	}
@@ -682,7 +678,7 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	}
 
 	// 4. Filter state=RESOLVED
-	res, total, err = service.ListInstances(ctx, orgA, string(AlertStateResolved), "", uuid.Nil, nil, nil, 1, 10)
+	res, total, err = service.ListInstances(ctx, InstanceFilter{OrgID: orgA, State: AlertState(AlertStateResolved), Severity: Severity(""), AlertID: uuid.Nil, From: nil, To: nil, Limit: 10, Offset: 0})
 	if err != nil {
 		testRunner.Fatalf("ListInstances with state filter failed: %v", err)
 	}
@@ -691,7 +687,7 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	}
 
 	// 5. Filter severity=medium
-	res, total, err = service.ListInstances(ctx, orgA, "", "medium", uuid.Nil, nil, nil, 1, 10)
+	res, total, err = service.ListInstances(ctx, InstanceFilter{OrgID: orgA, State: AlertState(""), Severity: Severity("medium"), AlertID: uuid.Nil, From: nil, To: nil, Limit: 10, Offset: 0})
 	if err != nil {
 		testRunner.Fatalf("ListInstances with severity filter failed: %v", err)
 	}
@@ -700,7 +696,7 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	}
 
 	// 6. Filter by alert_id
-	res, total, err = service.ListInstances(ctx, orgA, "", "", alertA1.ID, nil, nil, 1, 10)
+	_, total, err = service.ListInstances(ctx, InstanceFilter{OrgID: orgA, AlertID: alertA1.ID, From: nil, To: nil, Limit: 10, Offset: 0})
 	if err != nil {
 		testRunner.Fatalf("ListInstances with alert_id filter failed: %v", err)
 	}
@@ -709,9 +705,9 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	}
 
 	// 7. Filter by from/to time range
-	fromT := now.Add(-90 * time.Minute)
-	toT := now.Add(-45 * time.Minute)
-	res, total, err = service.ListInstances(ctx, orgA, "", "", uuid.Nil, &fromT, &toT, 1, 10)
+	fromT := now.Add(-15 * time.Minute) // inst2 triggered 10m ago; inst3 (20m) and inst1 (2h) fall outside
+	toT := now.Add(-7 * time.Minute)
+	res, total, err = service.ListInstances(ctx, InstanceFilter{OrgID: orgA, State: AlertState(""), Severity: Severity(""), AlertID: uuid.Nil, From: &fromT, To: &toT, Limit: 10, Offset: 0})
 	if err != nil {
 		testRunner.Fatalf("ListInstances with time filter failed: %v", err)
 	}
@@ -720,15 +716,15 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	}
 
 	// 8. Pagination
-	res, total, err = service.ListInstances(ctx, orgA, "", "", uuid.Nil, nil, nil, 1, 2)
+	res, total, err = service.ListInstances(ctx, InstanceFilter{OrgID: orgA, State: AlertState(""), Severity: Severity(""), AlertID: uuid.Nil, From: nil, To: nil, Limit: 2, Offset: 0})
 	if err != nil {
 		testRunner.Fatalf("ListInstances pagination page 1 failed: %v", err)
 	}
-	if total != 3 || len(res) != 2 || res[0].ID != inst3.ID || res[1].ID != inst2.ID {
+	if total != 3 || len(res) != 2 || res[0].ID != inst2.ID || res[1].ID != inst3.ID { // newest first
 		testRunner.Fatal("pagination page 1 failed")
 	}
 
-	res, total, err = service.ListInstances(ctx, orgA, "", "", uuid.Nil, nil, nil, 2, 2)
+	res, total, err = service.ListInstances(ctx, InstanceFilter{OrgID: orgA, State: AlertState(""), Severity: Severity(""), AlertID: uuid.Nil, From: nil, To: nil, Limit: 2, Offset: 2})
 	if err != nil {
 		testRunner.Fatalf("ListInstances pagination page 2 failed: %v", err)
 	}
@@ -741,7 +737,7 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	if err != nil {
 		testRunner.Fatalf("GetInstanceDetails failed: %v", err)
 	}
-	if details.AlertName != "cpu-high-a" || details.State != string(AlertStateFiring) || details.Severity != "high" {
+	if details.AlertName != "cpu-high-a" || details.State != AlertStateFiring || details.Severity != "high" {
 		testRunner.Fatalf("unexpected instance details: %+v", details)
 	}
 
@@ -757,7 +753,7 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	if err != nil {
 		testRunner.Fatalf("AcknowledgeInstance failed: %v", err)
 	}
-	if ackResp.State != string(AlertStateAcknowledged) || ackResp.AcknowledgedAt == nil {
+	if ackResp.State != AlertStateAcknowledged || ackResp.AcknowledgedAt == nil {
 		testRunner.Fatalf("failed to acknowledge instance via direct endpoint: %+v", ackResp)
 	}
 
@@ -771,5 +767,34 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 	_, err = service.AcknowledgeInstance(ctx, orgA, instB.ID)
 	if err == nil {
 		testRunner.Fatal("expected AcknowledgeInstance to fail for instB under orgA")
+	}
+}
+
+func newTestNotificationService(pool *pgxpool.Pool) *notification.Service {
+	store := notification.NewStore(pool)
+	return notification.NewService(store, notification.NewWorker(store, nil, nil, 1), nil)
+}
+
+// evaluateUntilFiring evaluates once (opening a PENDING instance), backdates
+// the pending timestamp past the condition window, and evaluates again.
+func evaluateUntilFiring(t *testing.T, ctx context.Context, pool *pgxpool.Pool, task *EvaluationTask, store *Store, alert Alert) {
+	t.Helper()
+	if err := task.evaluateAlert(ctx, alert); err != nil {
+		t.Fatalf("evaluateAlert (first breach) failed: %v", err)
+	}
+	inst, err := store.GetActiveInstance(ctx, alert.ID)
+	if err != nil || inst == nil || inst.State != AlertStatePending {
+		t.Fatalf("after first breach: instance = %+v, err = %v, want PENDING", inst, err)
+	}
+	expr, err := alert.ParsedCondition()
+	if err != nil {
+		t.Fatalf("ParsedCondition() error = %v", err)
+	}
+	backdated := time.Now().UTC().Add(-expr.Window() - time.Second)
+	if _, err := pool.Exec(ctx, "UPDATE alert_instances SET pending_fired_at = $1 WHERE id = $2", backdated, inst.ID); err != nil {
+		t.Fatalf("backdate pending_fired_at: %v", err)
+	}
+	if err := task.evaluateAlert(ctx, alert); err != nil {
+		t.Fatalf("evaluateAlert (after window) failed: %v", err)
 	}
 }

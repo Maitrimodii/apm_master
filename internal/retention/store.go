@@ -2,6 +2,7 @@ package retention
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -14,37 +15,27 @@ func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
-func (s *Store) DeleteOldRecords(ctx context.Context, table, timeCol string, days int, batchSize int) (int64, error) {
-	// Using dynamic SQL for table/column names is generally risky, but this is an internal
-	// administrative task where table names are hardcoded by us, not user input.
-	// To prevent locking the entire table for a long time, we delete in a loop using a CTE.
-	
+// DeleteOldRecords deletes up to batchSize rows of table whose timeCol is
+// older than days, and reports how many it deleted. Deleting in batches keeps
+// each statement's locks short.
+//
+// table and timeCol come from the Policy list in this package, never from
+// user input, which is why they are spliced into the SQL.
+func (s *Store) DeleteOldRecords(ctx context.Context, table, timeCol string, days, batchSize int) (int64, error) {
 	query := `
 		WITH deleted AS (
 			DELETE FROM ` + table + `
 			WHERE ctid IN (
-				SELECT ctid
-				FROM ` + table + `
+				SELECT ctid FROM ` + table + `
 				WHERE ` + timeCol + ` < NOW() - INTERVAL '1 day' * $1
 				LIMIT $2
 			)
 			RETURNING 1
 		)
-		SELECT count(*) FROM deleted;
-	`
-	
-	var deletedCount int64
-	err := s.pool.QueryRow(ctx, query, days, batchSize).Scan(&deletedCount)
-	return deletedCount, err
-}
-
-func (s *Store) AcquireLock(ctx context.Context, lockKey int64) (bool, error) {
-	var acquired bool
-	err := s.pool.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", lockKey).Scan(&acquired)
-	return acquired, err
-}
-
-func (s *Store) ReleaseLock(ctx context.Context, lockKey int64) error {
-	_, err := s.pool.Exec(ctx, "SELECT pg_advisory_unlock($1)", lockKey)
-	return err
+		SELECT count(*) FROM deleted`
+	var deleted int64
+	if err := s.pool.QueryRow(ctx, query, days, batchSize).Scan(&deleted); err != nil {
+		return 0, fmt.Errorf("delete old %s rows: %w", table, err)
+	}
+	return deleted, nil
 }

@@ -2,235 +2,184 @@ package alert
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const alertColumns = `id, org_id, created_by, name, description, severity, condition, condition_parsed,
+	is_enabled, notification_roles, created_at, updated_at`
+
+const instanceColumns = `ai.id, ai.alert_id, ai.state, ai.pending_fired_at, ai.triggered_at, ai.acknowledged_at,
+	ai.resolved_at, ai.last_evaluated_at, ai.value, ai.threshold, ai.message, ai.notification_sent,
+	ai.created_at, ai.updated_at`
+
 type Store struct {
-	database *pgxpool.Pool
+	db *pgxpool.Pool
 }
 
-func NewStore(database *pgxpool.Pool) *Store {
-	return &Store{database: database}
+func NewStore(db *pgxpool.Pool) *Store {
+	return &Store{db: db}
 }
 
-func (store *Store) Create(ctx context.Context, alert Alert) (*Alert, error) {
-	if len(alert.NotificationRoles) == 0 {
-		var adminRoleID uuid.UUID
-		err := store.database.QueryRow(ctx, "SELECT id FROM roles WHERE org_id = $1 AND name = 'admin'", alert.OrgID).Scan(&adminRoleID)
-		if err == nil {
-			alert.NotificationRoles = []uuid.UUID{adminRoleID}
-		} else {
-			alert.NotificationRoles = []uuid.UUID{}
-		}
+func (s *Store) Create(ctx context.Context, alert Alert) (*Alert, error) {
+	if err := s.defaultRoles(ctx, &alert); err != nil {
+		return nil, err
 	}
-	query := `
-		INSERT INTO alerts (org_id, created_by, name, description, severity, condition, is_enabled, notification_roles)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		RETURNING id, created_at, updated_at
-	`
-
-	err := store.database.QueryRow(ctx, query, alert.OrgID, alert.CreatedBy, alert.Name, alert.Description, alert.Severity, alert.Condition, alert.IsEnabled, alert.NotificationRoles).
-		Scan(&alert.ID, &alert.CreatedAt, &alert.UpdatedAt)
+	parsed, err := encodeExpression(alert.Expression)
+	if err != nil {
+		return nil, err
+	}
+	err = s.db.QueryRow(ctx, `
+		INSERT INTO alerts (org_id, created_by, name, description, severity, condition, condition_parsed, is_enabled, notification_roles)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		RETURNING id, created_at, updated_at`,
+		alert.OrgID, alert.CreatedBy, alert.Name, alert.Description, alert.Severity, alert.Condition, parsed, alert.IsEnabled, alert.NotificationRoles,
+	).Scan(&alert.ID, &alert.CreatedAt, &alert.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("create alert: %w", err)
 	}
-
 	return &alert, nil
 }
 
-func (store *Store) Get(ctx context.Context, orgID, alertID uuid.UUID) (*Alert, error) {
-	query := `
-		SELECT id, org_id, created_by, name, description, severity, condition, is_enabled, notification_roles, created_at, updated_at
-		FROM alerts
-		WHERE org_id = $1 AND id = $2
-	`
-
-	var alert Alert
-	err := store.database.QueryRow(ctx, query, orgID, alertID).Scan(
-		&alert.ID,
-		&alert.OrgID,
-		&alert.CreatedBy,
-		&alert.Name,
-		&alert.Description,
-		&alert.Severity,
-		&alert.Condition,
-		&alert.IsEnabled,
-		&alert.NotificationRoles,
-		&alert.CreatedAt,
-		&alert.UpdatedAt,
-	)
+func (s *Store) Get(ctx context.Context, orgID, alertID uuid.UUID) (*Alert, error) {
+	row := s.db.QueryRow(ctx, "SELECT "+alertColumns+" FROM alerts WHERE org_id = $1 AND id = $2", orgID, alertID)
+	alert, err := scanAlert(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("get alert: %w", err)
 	}
-
 	return &alert, nil
 }
 
-func (store *Store) List(ctx context.Context, orgID uuid.UUID, limit, offset int) ([]Alert, int, error) {
-	countQuery := `SELECT count(*) FROM alerts WHERE org_id = $1`
+func (s *Store) List(ctx context.Context, orgID uuid.UUID, limit, offset int) ([]Alert, int, error) {
 	var total int
-	if err := store.database.QueryRow(ctx, countQuery, orgID).Scan(&total); err != nil {
+	if err := s.db.QueryRow(ctx, "SELECT count(*) FROM alerts WHERE org_id = $1", orgID).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count alerts: %w", err)
 	}
-
-	query := `
-		SELECT id, org_id, created_by, name, description, severity, condition, is_enabled, notification_roles, created_at, updated_at
-		FROM alerts
-		WHERE org_id = $1
-		ORDER BY created_at DESC
-		LIMIT $2 OFFSET $3
-	`
-
-	rows, err := store.database.Query(ctx, query, orgID, limit, offset)
+	rows, err := s.db.Query(ctx,
+		"SELECT "+alertColumns+" FROM alerts WHERE org_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+		orgID, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list alerts: %w", err)
 	}
-	defer rows.Close()
-
-	alerts := make([]Alert, 0)
-	for rows.Next() {
-		var alert Alert
-		if err := rows.Scan(
-			&alert.ID,
-			&alert.OrgID,
-			&alert.CreatedBy,
-			&alert.Name,
-			&alert.Description,
-			&alert.Severity,
-			&alert.Condition,
-			&alert.IsEnabled,
-			&alert.NotificationRoles,
-			&alert.CreatedAt,
-			&alert.UpdatedAt,
-		); err != nil {
-			return nil, 0, fmt.Errorf("scan alert: %w", err)
-		}
-		alerts = append(alerts, alert)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("iterate alerts: %w", err)
-	}
-
-	return alerts, total, nil
+	alerts, err := collectAlerts(rows)
+	return alerts, total, err
 }
 
-func (store *Store) Update(ctx context.Context, alert Alert) (*Alert, error) {
-	if len(alert.NotificationRoles) == 0 {
-		var adminRoleID uuid.UUID
-		err := store.database.QueryRow(ctx, "SELECT id FROM roles WHERE org_id = $1 AND name = 'admin'", alert.OrgID).Scan(&adminRoleID)
-		if err == nil {
-			alert.NotificationRoles = []uuid.UUID{adminRoleID}
-		} else {
-			alert.NotificationRoles = []uuid.UUID{}
-		}
+func (s *Store) Update(ctx context.Context, alert Alert) (*Alert, error) {
+	if err := s.defaultRoles(ctx, &alert); err != nil {
+		return nil, err
 	}
-	query := `
-		UPDATE alerts
-		SET name = $1, description = $2, severity = $3, condition = $4, is_enabled = $5, notification_roles = $6, updated_at = now()
-		WHERE org_id = $7 AND id = $8
-		RETURNING created_at, updated_at, created_by
-	`
-
-	err := store.database.QueryRow(ctx, query, alert.Name, alert.Description, alert.Severity, alert.Condition, alert.IsEnabled, alert.NotificationRoles, alert.OrgID, alert.ID).
-		Scan(&alert.CreatedAt, &alert.UpdatedAt, &alert.CreatedBy)
+	parsed, err := encodeExpression(alert.Expression)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
+		return nil, err
+	}
+	err = s.db.QueryRow(ctx, `
+		UPDATE alerts
+		SET name = $1, description = $2, severity = $3, condition = $4, condition_parsed = $5,
+		    is_enabled = $6, notification_roles = $7, updated_at = now()
+		WHERE org_id = $8 AND id = $9
+		RETURNING created_at, updated_at, created_by`,
+		alert.Name, alert.Description, alert.Severity, alert.Condition, parsed, alert.IsEnabled, alert.NotificationRoles, alert.OrgID, alert.ID,
+	).Scan(&alert.CreatedAt, &alert.UpdatedAt, &alert.CreatedBy)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
 		return nil, fmt.Errorf("update alert: %w", err)
 	}
-
 	return &alert, nil
 }
 
-func (store *Store) ListEnabledPage(ctx context.Context, limit, offset int) ([]Alert, error) {
-	query := `
-		SELECT id, org_id, created_by, name, description, severity, condition, is_enabled, notification_roles, created_at, updated_at
-		FROM alerts
-		WHERE is_enabled = TRUE
-		ORDER BY id
-		LIMIT $1 OFFSET $2
-	`
+// Delete reports whether an alert was deleted.
+func (s *Store) Delete(ctx context.Context, orgID, alertID uuid.UUID) (bool, error) {
+	tag, err := s.db.Exec(ctx, "DELETE FROM alerts WHERE org_id = $1 AND id = $2", orgID, alertID)
+	if err != nil {
+		return false, fmt.Errorf("delete alert: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
 
-	rows, err := store.database.Query(ctx, query, limit, offset)
+// ListEnabledPage pages through enabled alerts across all orgs, for evaluation.
+func (s *Store) ListEnabledPage(ctx context.Context, limit, offset int) ([]Alert, error) {
+	rows, err := s.db.Query(ctx,
+		"SELECT "+alertColumns+" FROM alerts WHERE is_enabled = TRUE ORDER BY id LIMIT $1 OFFSET $2",
+		limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list enabled alerts page: %w", err)
 	}
-	defer rows.Close()
+	return collectAlerts(rows)
+}
 
-	alerts := make([]Alert, 0)
-	for rows.Next() {
-		var alert Alert
-		if err := rows.Scan(&alert.ID, &alert.OrgID, &alert.CreatedBy, &alert.Name, &alert.Description, &alert.Severity, &alert.Condition, &alert.IsEnabled, &alert.NotificationRoles, &alert.CreatedAt, &alert.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("scan enabled alert: %w", err)
-		}
-		alerts = append(alerts, alert)
+// defaultRoles notifies the org's admin role when no roles were chosen.
+func (s *Store) defaultRoles(ctx context.Context, alert *Alert) error {
+	if len(alert.NotificationRoles) > 0 {
+		return nil
 	}
-	return alerts, rows.Err()
+	var adminRoleID uuid.UUID
+	err := s.db.QueryRow(ctx, "SELECT id FROM roles WHERE org_id = $1 AND name = $2", alert.OrgID, adminRoleName).Scan(&adminRoleID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		alert.NotificationRoles = []uuid.UUID{}
+	case err != nil:
+		return fmt.Errorf("look up admin role: %w", err)
+	default:
+		alert.NotificationRoles = []uuid.UUID{adminRoleID}
+	}
+	return nil
 }
 
-type ResolvedUser struct {
-	ID    uuid.UUID
-	Email string
-}
-
-func (store *Store) ResolveUsersByRoles(ctx context.Context, orgID uuid.UUID, roles []uuid.UUID) ([]ResolvedUser, error) {
-	query := `
+func (s *Store) ResolveUsersByRoles(ctx context.Context, orgID uuid.UUID, roles []uuid.UUID) ([]Recipient, error) {
+	rows, err := s.db.Query(ctx, `
 		SELECT DISTINCT u.id, u.email
 		FROM users u
 		JOIN user_roles ur ON u.id = ur.user_id
-		WHERE u.org_id = $1 AND ur.role_id = ANY($2)
-	`
-	rows, err := store.database.Query(ctx, query, orgID, roles)
+		WHERE u.org_id = $1 AND ur.role_id = ANY($2)`, orgID, roles)
 	if err != nil {
 		return nil, fmt.Errorf("resolve users by roles: %w", err)
 	}
 	defer rows.Close()
 
-	var users []ResolvedUser
+	var users []Recipient
 	for rows.Next() {
-		var user ResolvedUser
-		if err := rows.Scan(&user.ID, &user.Email); err != nil {
-			return nil, fmt.Errorf("scan resolved user: %w", err)
+		var u Recipient
+		if err := rows.Scan(&u.ID, &u.Email); err != nil {
+			return nil, fmt.Errorf("scan recipient: %w", err)
 		}
-		users = append(users, user)
+		users = append(users, u)
 	}
 	return users, rows.Err()
 }
 
-func (store *Store) GetActiveInstance(ctx context.Context, alertID uuid.UUID) (*AlertInstance, error) {
-	query := `
-		SELECT id, alert_id, state, pending_fired_at, triggered_at, acknowledged_at, resolved_at, last_evaluated_at, value, threshold, message, notification_sent, created_at, updated_at
-		FROM alert_instances
-		WHERE alert_id = $1 AND state IN ('PENDING', 'FIRING','ACKNOWLEDGED')
-		ORDER BY triggered_at DESC
-		LIMIT 1
-	`
-
-	var instance AlertInstance
-	err := store.database.QueryRow(ctx, query, alertID).Scan(&instance.ID, &instance.AlertID, &instance.State, &instance.PendingFiredAt, &instance.TriggeredAt, &instance.AcknowledgedAt, &instance.ResolvedAt, &instance.LastEvaluatedAt, &instance.Value, &instance.Threshold, &instance.Message, &instance.NotificationSent, &instance.CreatedAt, &instance.UpdatedAt)
+func (s *Store) GetActiveInstance(ctx context.Context, alertID uuid.UUID) (*AlertInstance, error) {
+	row := s.db.QueryRow(ctx, `
+		SELECT `+instanceColumns+`
+		FROM alert_instances ai
+		WHERE ai.alert_id = $1 AND ai.state = ANY($2)
+		ORDER BY ai.triggered_at DESC
+		LIMIT 1`, alertID, activeStates)
+	inst, err := scanInstance(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("get active alert instance: %w", err)
 	}
-	return &instance, nil
+	return &inst, nil
 }
 
-func (store *Store) SaveInstance(ctx context.Context, instance AlertInstance) error {
-	query := `
-		INSERT INTO alert_instances (id, alert_id, state, pending_fired_at, triggered_at, acknowledged_at, resolved_at, last_evaluated_at, value, threshold, message, notification_sent, created_at, updated_at)
+func (s *Store) SaveInstance(ctx context.Context, i AlertInstance) error {
+	_, err := s.db.Exec(ctx, `
+		INSERT INTO alert_instances (id, alert_id, state, pending_fired_at, triggered_at, acknowledged_at, resolved_at,
+		                             last_evaluated_at, value, threshold, message, notification_sent, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), now())
 		ON CONFLICT (id) DO UPDATE
 		SET state = EXCLUDED.state,
@@ -243,70 +192,50 @@ func (store *Store) SaveInstance(ctx context.Context, instance AlertInstance) er
 		    threshold = EXCLUDED.threshold,
 		    message = EXCLUDED.message,
 		    notification_sent = EXCLUDED.notification_sent,
-		    updated_at = now()
-	`
-
-	_, err := store.database.Exec(ctx, query,
-		instance.ID, instance.AlertID, instance.State, instance.PendingFiredAt, instance.TriggeredAt, instance.AcknowledgedAt, instance.ResolvedAt, instance.LastEvaluatedAt, instance.Value, instance.Threshold, instance.Message, instance.NotificationSent,
+		    updated_at = now()`,
+		i.ID, i.AlertID, i.State, i.PendingFiredAt, i.TriggeredAt, i.AcknowledgedAt, i.ResolvedAt,
+		i.LastEvaluatedAt, i.Value, i.Threshold, i.Message, i.NotificationSent,
 	)
-	return err
+	if err != nil {
+		return fmt.Errorf("save alert instance: %w", err)
+	}
+	return nil
 }
 
-func (store *Store) ListInstances(ctx context.Context, orgID uuid.UUID, state, severity string, alertID uuid.UUID, from, timeout *time.Time, limit, offset int) ([]AlertInstance, int, error) {
-	args := []any{orgID}
-	filters := ""
-	nextArg := 2
-
-	if state != "" {
-		filters += fmt.Sprintf(" AND ai.state = $%d", nextArg)
-		args = append(args, state)
-		nextArg++
+func (s *Store) ListInstances(ctx context.Context, f InstanceFilter) ([]AlertInstance, int, error) {
+	conds := []string{"a.org_id = $1"}
+	args := []any{f.OrgID}
+	add := func(cond string, arg any) {
+		args = append(args, arg)
+		conds = append(conds, fmt.Sprintf(cond, len(args)))
 	}
-	if severity != "" {
-		filters += fmt.Sprintf(" AND a.severity = $%d", nextArg)
-		args = append(args, severity)
-		nextArg++
+	if f.State != "" {
+		add("ai.state = $%d", f.State)
 	}
-	if alertID != uuid.Nil {
-		filters += fmt.Sprintf(" AND ai.alert_id = $%d", nextArg)
-		args = append(args, alertID)
-		nextArg++
+	if f.Severity != "" {
+		add("a.severity = $%d", f.Severity)
 	}
-	if from != nil {
-		filters += fmt.Sprintf(" AND ai.triggered_at >= $%d", nextArg)
-		args = append(args, *from)
-		nextArg++
+	if f.AlertID != uuid.Nil {
+		add("ai.alert_id = $%d", f.AlertID)
 	}
-	if timeout != nil {
-		filters += fmt.Sprintf(" AND ai.triggered_at <= $%d", nextArg)
-		args = append(args, *timeout)
-		nextArg++
+	if f.From != nil {
+		add("ai.triggered_at >= $%d", *f.From)
 	}
-
-	countQuery := `
-		SELECT COUNT(*)
-		FROM alert_instances ai
-		JOIN alerts a ON ai.alert_id = a.id
-		WHERE a.org_id = $1` + filters
+	if f.To != nil {
+		add("ai.triggered_at <= $%d", *f.To)
+	}
+	from := " FROM alert_instances ai JOIN alerts a ON ai.alert_id = a.id WHERE " + strings.Join(conds, " AND ")
 
 	var total int
-	if err := store.database.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRow(ctx, "SELECT COUNT(*)"+from, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count alert instances: %w", err)
 	}
 
-	limitIdx := nextArg
-	offsetIdx := nextArg + 1
-	args = append(args, limit, offset)
-
-	query := fmt.Sprintf(`
-		SELECT ai.id, ai.alert_id, ai.state, ai.triggered_at, ai.acknowledged_at, ai.resolved_at, ai.last_evaluated_at, ai.value, ai.threshold, ai.message, ai.notification_sent, ai.created_at, ai.updated_at
-		FROM alert_instances ai
-		JOIN alerts a ON ai.alert_id = a.id
-		WHERE a.org_id = $1%s
-		ORDER BY ai.triggered_at DESC
-		LIMIT $%d OFFSET $%d`, filters, limitIdx, offsetIdx)
-
-	rows, err := store.database.Query(ctx, query, args...)
+	args = append(args, f.Limit, f.Offset)
+	rows, err := s.db.Query(ctx,
+		fmt.Sprintf("SELECT %s, a.name, a.severity%s ORDER BY ai.triggered_at DESC LIMIT $%d OFFSET $%d",
+			instanceColumns, from, len(args)-1, len(args)),
+		args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list alert instances: %w", err)
 	}
@@ -314,78 +243,138 @@ func (store *Store) ListInstances(ctx context.Context, orgID uuid.UUID, state, s
 
 	var instances []AlertInstance
 	for rows.Next() {
-		var ai AlertInstance
-		err := rows.Scan(
-			&ai.ID, &ai.AlertID, &ai.State, &ai.TriggeredAt, &ai.AcknowledgedAt, &ai.ResolvedAt, &ai.LastEvaluatedAt, &ai.Value, &ai.Threshold, &ai.Message, &ai.NotificationSent, &ai.CreatedAt, &ai.UpdatedAt,
-		)
+		var inst AlertInstance
+		err := rows.Scan(&inst.ID, &inst.AlertID, &inst.State, &inst.PendingFiredAt, &inst.TriggeredAt,
+			&inst.AcknowledgedAt, &inst.ResolvedAt, &inst.LastEvaluatedAt, &inst.Value, &inst.Threshold,
+			&inst.Message, &inst.NotificationSent, &inst.CreatedAt, &inst.UpdatedAt, &inst.AlertName, &inst.Severity)
 		if err != nil {
 			return nil, 0, fmt.Errorf("scan alert instance: %w", err)
 		}
-		instances = append(instances, ai)
+		instances = append(instances, inst)
 	}
-
 	return instances, total, rows.Err()
 }
 
-func (store *Store) GetInstanceDetails(ctx context.Context, orgID, instanceID uuid.UUID) (*AlertInstanceDetailsResponse, error) {
-	query := `
-		SELECT ai.id, ai.alert_id, a.name, a.description, ai.state, a.severity, ai.triggered_at, ai.acknowledged_at, ai.resolved_at, ai.last_evaluated_at, ai.value, ai.threshold, ai.message, ai.notification_sent, ai.created_at, ai.updated_at
+func (s *Store) GetInstanceDetails(ctx context.Context, orgID, instanceID uuid.UUID) (*AlertInstanceDetailsResponse, error) {
+	var d AlertInstanceDetailsResponse
+	err := s.db.QueryRow(ctx, `
+		SELECT ai.id, ai.alert_id, a.name, a.description, ai.state, a.severity, ai.triggered_at, ai.acknowledged_at,
+		       ai.resolved_at, ai.last_evaluated_at, ai.value, ai.threshold, ai.message, ai.notification_sent,
+		       ai.created_at, ai.updated_at
 		FROM alert_instances ai
 		JOIN alerts a ON ai.alert_id = a.id
-		WHERE a.org_id = $1 AND ai.id = $2
-	`
-	var details AlertInstanceDetailsResponse
-	err := store.database.QueryRow(ctx, query, orgID, instanceID).Scan(
-		&details.ID, &details.AlertID, &details.AlertName, &details.AlertDescription, &details.State, &details.Severity, &details.TriggeredAt, &details.AcknowledgedAt, &details.ResolvedAt, &details.LastEvaluatedAt, &details.Value, &details.Threshold, &details.Message, &details.NotificationSent, &details.CreatedAt, &details.UpdatedAt,
+		WHERE a.org_id = $1 AND ai.id = $2`, orgID, instanceID,
+	).Scan(
+		&d.ID, &d.AlertID, &d.AlertName, &d.AlertDescription, &d.State, &d.Severity, &d.TriggeredAt, &d.AcknowledgedAt,
+		&d.ResolvedAt, &d.LastEvaluatedAt, &d.Value, &d.Threshold, &d.Message, &d.NotificationSent,
+		&d.CreatedAt, &d.UpdatedAt,
 	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("get alert instance details: %w", err)
 	}
-	return &details, nil
+	return &d, nil
 }
 
-func (store *Store) GetInstance(ctx context.Context, orgID, instanceID uuid.UUID) (*AlertInstance, error) {
-	query := `
-		SELECT ai.id, ai.alert_id, ai.state, ai.triggered_at, ai.acknowledged_at, ai.resolved_at, ai.last_evaluated_at, ai.value, ai.threshold, ai.message, ai.notification_sent, ai.created_at, ai.updated_at
+func (s *Store) GetInstance(ctx context.Context, orgID, instanceID uuid.UUID) (*AlertInstance, error) {
+	row := s.db.QueryRow(ctx, `
+		SELECT `+instanceColumns+`
 		FROM alert_instances ai
 		JOIN alerts a ON ai.alert_id = a.id
-		WHERE a.org_id = $1 AND ai.id = $2
-	`
-	var ai AlertInstance
-	err := store.database.QueryRow(ctx, query, orgID, instanceID).Scan(
-		&ai.ID, &ai.AlertID, &ai.State, &ai.TriggeredAt, &ai.AcknowledgedAt, &ai.ResolvedAt, &ai.LastEvaluatedAt, &ai.Value, &ai.Threshold, &ai.Message, &ai.NotificationSent, &ai.CreatedAt, &ai.UpdatedAt,
-	)
+		WHERE a.org_id = $1 AND ai.id = $2`, orgID, instanceID)
+	inst, err := scanInstance(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("get alert instance: %w", err)
 	}
-	return &ai, nil
+	return &inst, nil
 }
 
-func (store *Store) Delete(ctx context.Context, orgID, alertID uuid.UUID) error {
-	query := `DELETE FROM alerts WHERE org_id = $1 AND id = $2`
-	tag, err := store.database.Exec(ctx, query, orgID, alertID)
+func scanAlert(row pgx.Row) (Alert, error) {
+	var a Alert
+	var parsed []byte
+	if err := row.Scan(&a.ID, &a.OrgID, &a.CreatedBy, &a.Name, &a.Description, &a.Severity, &a.Condition, &parsed,
+		&a.IsEnabled, &a.NotificationRoles, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		return Alert{}, err
+	}
+	if len(parsed) > 0 {
+		var expr Expression
+		if err := json.Unmarshal(parsed, &expr); err != nil {
+			return Alert{}, fmt.Errorf("decode condition_parsed for alert %s: %w", a.ID, err)
+		}
+		a.Expression = &expr
+	}
+	return a, nil
+}
+
+func collectAlerts(rows pgx.Rows) ([]Alert, error) {
+	defer rows.Close()
+	alerts := []Alert{}
+	for rows.Next() {
+		a, err := scanAlert(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan alert: %w", err)
+		}
+		alerts = append(alerts, a)
+	}
+	return alerts, rows.Err()
+}
+
+func scanInstance(row pgx.Row) (AlertInstance, error) {
+	var i AlertInstance
+	err := row.Scan(&i.ID, &i.AlertID, &i.State, &i.PendingFiredAt, &i.TriggeredAt, &i.AcknowledgedAt,
+		&i.ResolvedAt, &i.LastEvaluatedAt, &i.Value, &i.Threshold, &i.Message, &i.NotificationSent,
+		&i.CreatedAt, &i.UpdatedAt)
+	return i, err
+}
+
+func encodeExpression(expr *Expression) ([]byte, error) {
+	if expr == nil {
+		return nil, nil
+	}
+	b, err := json.Marshal(expr)
 	if err != nil {
-		return fmt.Errorf("delete alert: %w", err)
+		return nil, fmt.Errorf("encode condition: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return pgx.ErrNoRows
-	}
-	return nil
+	return b, nil
 }
 
-func (store *Store) AcquireLock(ctx context.Context, lockKey int64) (bool, error) {
-	var acquired bool
-	err := store.database.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", lockKey).Scan(&acquired)
-	return acquired, err
-}
-
-func (store *Store) ReleaseLock(ctx context.Context, lockKey int64) error {
-	_, err := store.database.Exec(ctx, "SELECT pg_advisory_unlock($1)", lockKey)
-	return err
+// GetIncident loads an alert instance and its definition by instance ID,
+// across orgs. Callers must check Alert.OrgID against the caller's tenant.
+func (s *Store) GetIncident(ctx context.Context, instanceID uuid.UUID) (*Incident, error) {
+	var inc Incident
+	var parsed []byte
+	a, i := &inc.Alert, &inc.Instance
+	err := s.db.QueryRow(ctx, `
+		SELECT a.id, a.org_id, a.created_by, a.name, a.description, a.severity, a.condition, a.condition_parsed,
+		       a.is_enabled, a.notification_roles, a.created_at, a.updated_at,
+		       `+instanceColumns+`, ai.service_name
+		FROM alert_instances ai
+		JOIN alerts a ON ai.alert_id = a.id
+		WHERE ai.id = $1`, instanceID,
+	).Scan(
+		&a.ID, &a.OrgID, &a.CreatedBy, &a.Name, &a.Description, &a.Severity, &a.Condition, &parsed,
+		&a.IsEnabled, &a.NotificationRoles, &a.CreatedAt, &a.UpdatedAt,
+		&i.ID, &i.AlertID, &i.State, &i.PendingFiredAt, &i.TriggeredAt, &i.AcknowledgedAt,
+		&i.ResolvedAt, &i.LastEvaluatedAt, &i.Value, &i.Threshold, &i.Message, &i.NotificationSent,
+		&i.CreatedAt, &i.UpdatedAt, &inc.ServiceName,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get incident: %w", err)
+	}
+	if len(parsed) > 0 {
+		var expr Expression
+		if err := json.Unmarshal(parsed, &expr); err != nil {
+			return nil, fmt.Errorf("decode condition_parsed for alert %s: %w", a.ID, err)
+		}
+		a.Expression = &expr
+	}
+	return &inc, nil
 }

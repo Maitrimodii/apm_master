@@ -9,8 +9,9 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/Maitrimodii/apm_master/test/e2e/framework"
 	"github.com/google/uuid"
+
+	"github.com/Maitrimodii/apm_master/test/e2e/framework"
 )
 
 func TestAuthFlow(t *testing.T) {
@@ -29,13 +30,13 @@ func TestAuthFlow(t *testing.T) {
 		body, _ := json.Marshal(registerPayload)
 		req, _ := http.NewRequest("POST", ctx.BaseURL+"/api/v1/auth/register", bytes.NewBuffer(body))
 		req.Header.Set("Content-Type", "application/json")
-		
+
 		resp, err := ctx.HTTPClient.Do(req)
 		if err != nil {
 			t.Fatalf("Failed to call register: %v", err)
 		}
 		defer resp.Body.Close()
-		
+
 		if resp.StatusCode != http.StatusConflict && resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("Expected 409/400 on register with existing email, got %d", resp.StatusCode)
 		}
@@ -54,13 +55,13 @@ func TestAuthFlow(t *testing.T) {
 		body, _ := json.Marshal(registerPayload)
 		req, _ := http.NewRequest("POST", ctx.BaseURL+"/api/v1/auth/register", bytes.NewBuffer(body))
 		req.Header.Set("Content-Type", "application/json")
-		
+
 		resp, err := ctx.HTTPClient.Do(req)
 		if err != nil {
 			t.Fatalf("Failed to call register: %v", err)
 		}
 		defer resp.Body.Close()
-		
+
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("Expected 400 on register with weak password, got %d", resp.StatusCode)
 		}
@@ -75,7 +76,7 @@ func TestAuthFlow(t *testing.T) {
 		body, _ := json.Marshal(loginPayload)
 		req, _ := http.NewRequest("POST", ctx.BaseURL+"/api/v1/auth/login", bytes.NewBuffer(body))
 		req.Header.Set("Content-Type", "application/json")
-		
+
 		resp, err := ctx.HTTPClient.Do(req)
 		if err != nil {
 			t.Fatalf("Failed to call login: %v", err)

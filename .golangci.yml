@@ -1,0 +1,47 @@
+version: "2"
+
+run:
+  timeout: 5m
+  build-tags: [e2e]
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - revive
+    - gocritic
+    - misspell
+    - bodyclose
+    - noctx
+  settings:
+    revive:
+      rules:
+        - name: receiver-naming
+        - name: var-naming
+        - name: error-strings
+        - name: context-as-argument
+          arguments:
+            - allowTypesBefore: "*testing.T"
+        - name: context-keys-type
+        - name: unexported-return
+          disabled: true
+    staticcheck:
+      # S1016 suggests converting DB models straight into response DTOs,
+      # which would couple the two struct definitions.
+      checks: ["all", "-S1016", "-ST1000", "-ST1003"]
+    gocritic:
+      disabled-checks: [ifElseChain]
+  exclusions:
+    rules:
+      # Tests may ignore Close errors on fixtures and use fmt for setup.
+      - path: _test\.go
+        linters: [errcheck, noctx]
+
+formatters:
+  enable: [gofmt, goimports]
+  settings:
+    goimports:
+      local-prefixes: [github.com/Maitrimodii/apm_master]

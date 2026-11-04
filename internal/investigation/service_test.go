@@ -2,6 +2,7 @@ package investigation
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -9,9 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Maitrimodii/apm_master/internal/database"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Maitrimodii/apm_master/internal/alert"
+	"github.com/Maitrimodii/apm_master/internal/platform/pg"
 )
 
 const integrationDSNEnv = "APM_INTEGRATION_DSN"
@@ -31,7 +34,7 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := database.Migrate(dsn, "../../migrations"); err != nil {
+	if err := pg.Migrate(dsn, "../../migrations"); err != nil {
 		t.Fatalf("database.Migrate() error = %v", err)
 	}
 
@@ -88,51 +91,39 @@ func TestStateTransitions(t *testing.T) {
 	}
 }
 
-func TestTimeWindowValidation(t *testing.T) {
-	svc := NewService(nil, testLogger())
+type fakeIncidents struct{ incident *alert.Incident }
+
+func (f fakeIncidents) GetIncident(context.Context, uuid.UUID) (*alert.Incident, error) {
+	return f.incident, nil
+}
+
+func TestCreateValidatesIncidentAndWindow(t *testing.T) {
+	orgID, userID, incidentID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	incident := &alert.Incident{Alert: alert.Alert{OrgID: orgID}, Instance: alert.AlertInstance{ID: incidentID, TriggeredAt: now}}
+	svc := NewService(nil, fakeIncidents{incident: incident}, testLogger())
 	ctx := context.Background()
-	orgID := uuid.New()
-	userID := uuid.New()
-	incidentID := uuid.New()
 
-	// 1. start > end
-	now := time.Now()
-	start := now.Add(1 * time.Hour)
-	end := now
-
-	req := CreateInvestigationRequest{
-		TimeRangeStart: &start,
-		TimeRangeEnd:   &end,
+	later, longAfter := now.Add(time.Hour), now.Add(25*time.Hour)
+	tests := []struct {
+		name  string
+		org   uuid.UUID
+		start *time.Time
+		end   *time.Time
+		want  error
+	}{
+		{name: "start after end", org: orgID, start: &later, end: &now, want: ErrTimeWindowInvalid},
+		{name: "window over 24h", org: orgID, start: &now, end: &longAfter, want: ErrTimeWindowTooLarge},
+		{name: "other tenant's incident", org: uuid.New(), want: ErrIncidentNotFound},
 	}
-
-	// Mock or check validation in Create:
-	// When store is nil or incident not verified, let's verify time window logic directly
-	if start.After(end) != true {
-		t.Fatal("expected start to be after end")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := svc.Create(ctx, tc.org, userID, incidentID, uuid.Nil, CreateInvestigationRequest{TimeRangeStart: tc.start, TimeRangeEnd: tc.end})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Create() error = %v, want %v", err, tc.want)
+			}
+		})
 	}
-
-	// 2. window > 24 hours
-	start = now
-	end = now.Add(25 * time.Hour)
-	if end.Sub(start) <= MaxTimeWindow {
-		t.Fatal("expected window > 24 hours")
-	}
-
-	// 3. Retry active state check
-	runningInv := &Investigation{
-		ID:     uuid.New(),
-		Status: StatusRunning,
-	}
-	if TerminalStatuses[runningInv.Status] {
-		t.Fatal("running investigation should not be terminal")
-	}
-
-	_ = svc
-	_ = ctx
-	_ = orgID
-	_ = userID
-	_ = incidentID
-	_ = req
 }
 
 func TestCancelTerminalStateIdempotence(t *testing.T) {
@@ -148,7 +139,7 @@ func TestDatabaseIntegrationLifecycle(t *testing.T) {
 	ctx := context.Background()
 	logger := testLogger()
 	store := NewStore(pool)
-	svc := NewService(store, logger)
+	svc := NewService(store, alert.NewStore(pool), logger)
 
 	// Setup tenant and user
 	orgID := uuid.New()
@@ -161,7 +152,7 @@ func TestDatabaseIntegrationLifecycle(t *testing.T) {
 		t.Fatalf("create org: %v", err)
 	}
 
-	_, err = pool.Exec(ctx, `INSERT INTO users (id, org_id, email, password_hash) VALUES ($1, $2, $3, 'hash')`, userID, orgID, "u-"+uuid.NewString()+"@test.com")
+	_, err = pool.Exec(ctx, `INSERT INTO users (id, org_id, email, password_hash, first_name, last_name) VALUES ($1, $2, $3, 'hash', 'Test', 'User')`, userID, orgID, "u-"+uuid.NewString()+"@test.com")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -214,11 +205,8 @@ func TestDatabaseIntegrationLifecycle(t *testing.T) {
 	// 2. Tenant isolation: Get with different org ID returns nil
 	otherOrgID := uuid.New()
 	otherInv, err := svc.Get(ctx, otherOrgID, inv.ID)
-	if err != nil {
-		t.Fatalf("svc.Get() error = %v", err)
-	}
-	if otherInv != nil {
-		t.Errorf("expected nil investigation for different org, got %+v", otherInv)
+	if !errors.Is(err, ErrInvestigationNotFound) || otherInv != nil {
+		t.Errorf("Get(other org) = (%+v, %v), want (nil, ErrInvestigationNotFound)", otherInv, err)
 	}
 
 	// 3. Idempotency key: second request returns same investigation ID
@@ -265,5 +253,19 @@ func TestDatabaseIntegrationLifecycle(t *testing.T) {
 	_, err = svc.Retry(ctx, orgID, userID, retriedInv.ID, uuid.New())
 	if err != ErrCannotRetryActive {
 		t.Errorf("expected ErrCannotRetryActive, got %v", err)
+	}
+
+	// 8. Events without a sequence number get the next one from the store.
+	for _, typ := range []string{"investigation.started", "evidence.gathered"} {
+		if err := svc.AppendEvent(ctx, inv.ID, AppendEventRequest{EventType: typ, Summary: typ}); err != nil {
+			t.Fatalf("AppendEvent(%s) error = %v", typ, err)
+		}
+	}
+	events, err := svc.ListEvents(ctx, orgID, inv.ID)
+	if err != nil {
+		t.Fatalf("ListEvents() error = %v", err)
+	}
+	if len(events) != 2 || events[0].SequenceNumber != 1 || events[1].SequenceNumber != 2 {
+		t.Fatalf("events = %+v, want sequence numbers 1 and 2", events)
 	}
 }

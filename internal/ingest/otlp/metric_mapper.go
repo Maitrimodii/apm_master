@@ -5,15 +5,16 @@ import (
 	"math"
 	"time"
 
-	"github.com/Maitrimodii/apm_master/internal/metric"
 	"github.com/google/uuid"
+
+	"github.com/Maitrimodii/apm_master/internal/metrics"
 )
 
 // MetricBatch groups mapped metrics with their histogram buckets.
 // Both must be written atomically — see MetricWriter.BulkInsertWithBuckets.
 type MetricBatch struct {
-	Metrics []metric.Metric
-	Buckets []metric.HistogramBucket
+	Metrics []metrics.Metric
+	Buckets []metrics.HistogramBucket
 }
 
 // MapMetricsRequest maps an OTLP metrics request to the internal domain model.
@@ -22,12 +23,12 @@ func MapMetricsRequest(req IngestMetricsRequest, orgID uuid.UUID) (batch MetricB
 	for _, rm := range req.ResourceMetrics {
 		for _, streamManager := range rm.ScopeMetrics {
 			for _, dto := range streamManager.Metrics {
-				mapItem, buckets, err := mapMetric(dto, rm.Resource.Attributes, orgID)
+				points, buckets, err := mapMetric(dto, rm.Resource.Attributes, orgID)
 				if err != nil {
 					rejected++
 					continue
 				}
-				batch.Metrics = append(batch.Metrics, mapItem...)
+				batch.Metrics = append(batch.Metrics, points...)
 				batch.Buckets = append(batch.Buckets, buckets...)
 			}
 		}
@@ -37,17 +38,17 @@ func MapMetricsRequest(req IngestMetricsRequest, orgID uuid.UUID) (batch MetricB
 
 // mapMetric maps a single MetricDTO to one or more Metric values.
 // A single DTO can produce multiple Metric rows — one per data point.
-func mapMetric(dto MetricDTO, resourceAttrs map[string]any, orgID uuid.UUID) ([]metric.Metric, []metric.HistogramBucket, error) {
-	var ms []metric.Metric
-	var buckets []metric.HistogramBucket
+func mapMetric(dto MetricDTO, resourceAttrs map[string]any, orgID uuid.UUID) ([]metrics.Metric, []metrics.HistogramBucket, error) {
+	var ms []metrics.Metric
+	var buckets []metrics.HistogramBucket
 	var err error
 
 	switch {
 	case dto.Gauge != nil:
-		ms, buckets, err = mapNumberDataPoints(dto.Name, metric.MetricTypeGauge, dto.Gauge.DataPoints, resourceAttrs, orgID)
+		ms, buckets, err = mapNumberDataPoints(dto.Name, metrics.MetricTypeGauge, dto.Gauge.DataPoints, resourceAttrs, orgID)
 
 	case dto.Sum != nil:
-		ms, buckets, err = mapNumberDataPoints(dto.Name, metric.MetricTypeCounter, dto.Sum.DataPoints, resourceAttrs, orgID)
+		ms, buckets, err = mapNumberDataPoints(dto.Name, metrics.MetricTypeCounter, dto.Sum.DataPoints, resourceAttrs, orgID)
 
 	case dto.Histogram != nil:
 		ms, buckets, err = mapHistogram(dto.Name, dto.Histogram, resourceAttrs, orgID)
@@ -63,7 +64,7 @@ func mapMetric(dto MetricDTO, resourceAttrs map[string]any, orgID uuid.UUID) ([]
 		return nil, nil, err
 	}
 
-	unit := metric.StandardizeUnit(dto.Unit)
+	unit := metrics.StandardizeUnit(dto.Unit)
 	for index := range ms {
 		if ms[index].Labels == nil {
 			ms[index].Labels = make(map[string]any)
@@ -82,12 +83,12 @@ func mapMetric(dto MetricDTO, resourceAttrs map[string]any, orgID uuid.UUID) ([]
 
 func mapNumberDataPoints(
 	name string,
-	metricType metric.MetricType,
+	metricType metrics.MetricType,
 	points []NumberDataPointDTO,
 	resourceAttrs map[string]any,
 	orgID uuid.UUID,
-) ([]metric.Metric, []metric.HistogramBucket, error) {
-	result := make([]metric.Metric, 0, len(points))
+) ([]metrics.Metric, []metrics.HistogramBucket, error) {
+	result := make([]metrics.Metric, 0, len(points))
 
 	for _, p := range points {
 		if p.TimeUnixNano == 0 {
@@ -101,15 +102,15 @@ func mapNumberDataPoints(
 			val = float64(*p.AsInt)
 		}
 
-		testRunner := time.Unix(0, p.TimeUnixNano).UTC()
-		if err := validateTime(testRunner); err != nil {
+		ts := time.Unix(0, p.TimeUnixNano).UTC()
+		if err := validateTime(ts); err != nil {
 			return nil, nil, err
 		}
 
 		labels := mergeLabels(resourceAttrs, p.Attributes)
 
-		result = append(result, metric.Metric{
-			Time:       testRunner,
+		result = append(result, metrics.Metric{
+			Time:       ts,
 			OrgID:      orgID,
 			MetricName: name,
 			MetricType: metricType,
@@ -126,27 +127,27 @@ func mapHistogram(
 	dto *HistogramDTO,
 	resourceAttrs map[string]any,
 	orgID uuid.UUID,
-) ([]metric.Metric, []metric.HistogramBucket, error) {
-	var ms []metric.Metric
-	var buckets []metric.HistogramBucket
+) ([]metrics.Metric, []metrics.HistogramBucket, error) {
+	var ms []metrics.Metric
+	var buckets []metrics.HistogramBucket
 
 	for _, p := range dto.DataPoints {
 		if p.TimeUnixNano == 0 {
 			continue
 		}
 
-		testRunner := time.Unix(0, p.TimeUnixNano).UTC()
-		if err := validateTime(testRunner); err != nil {
+		ts := time.Unix(0, p.TimeUnixNano).UTC()
+		if err := validateTime(ts); err != nil {
 			return nil, nil, err
 		}
 		labels := mergeLabels(resourceAttrs, p.Attributes)
 
 		// The summary row in metrics table stores the sum value.
-		ms = append(ms, metric.Metric{
-			Time:       testRunner,
+		ms = append(ms, metrics.Metric{
+			Time:       ts,
 			OrgID:      orgID,
 			MetricName: name,
-			MetricType: metric.MetricTypeHistogram,
+			MetricType: metrics.MetricTypeHistogram,
 			Value:      p.Sum,
 			Labels:     labels,
 		})
@@ -162,8 +163,8 @@ func mapHistogram(
 				le = math.Inf(1) // +Inf bucket
 			}
 
-			buckets = append(buckets, metric.HistogramBucket{
-				Time:       testRunner,
+			buckets = append(buckets, metrics.HistogramBucket{
+				Time:       ts,
 				OrgID:      orgID,
 				MetricName: name,
 				Labels:     labels,
@@ -181,16 +182,16 @@ func mapSummary(
 	dto *SummaryDTO,
 	resourceAttrs map[string]any,
 	orgID uuid.UUID,
-) ([]metric.Metric, []metric.HistogramBucket, error) {
-	var ms []metric.Metric
+) ([]metrics.Metric, []metrics.HistogramBucket, error) {
+	var ms []metrics.Metric
 
 	for _, p := range dto.DataPoints {
 		if p.TimeUnixNano == 0 {
 			continue
 		}
 
-		testRunner := time.Unix(0, p.TimeUnixNano).UTC()
-		if err := validateTime(testRunner); err != nil {
+		ts := time.Unix(0, p.TimeUnixNano).UTC()
+		if err := validateTime(ts); err != nil {
 			return nil, nil, err
 		}
 		labels := mergeLabels(resourceAttrs, p.Attributes)
@@ -205,11 +206,11 @@ func mapSummary(
 			quantileLabels[fmt.Sprintf("quantile_%v", q.Quantile)] = q.Value
 		}
 
-		ms = append(ms, metric.Metric{
-			Time:       testRunner,
+		ms = append(ms, metrics.Metric{
+			Time:       ts,
 			OrgID:      orgID,
 			MetricName: name,
-			MetricType: metric.MetricTypeSummary,
+			MetricType: metrics.MetricTypeSummary,
 			Value:      p.Sum,
 			Labels:     quantileLabels,
 		})

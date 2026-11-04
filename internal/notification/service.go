@@ -2,101 +2,84 @@ package notification
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
-
-	"github.com/Maitrimodii/apm_master/internal/config"
-	"github.com/Maitrimodii/apm_master/internal/server"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+var errTaskIncomplete = errors.New("notification task requires event_type, recipient, and subject")
+
+// Service enqueues notifications and records in-app events. Delivery is done
+// asynchronously by the Worker.
 type Service struct {
 	store  *Store
-	worker *NotificationWorker
+	worker *Worker
 	log    *slog.Logger
 }
 
-func NewService(pool *pgxpool.Pool, cfg *config.Config, log *slog.Logger) *Service {
+func NewService(store *Store, worker *Worker, log *slog.Logger) *Service {
 	if log == nil {
 		log = slog.Default()
 	}
-
-	store := NewStore(pool)
-	providers := []NotificationProvider{
-		NewSMTPProvider(cfg),
-	}
-
-	return &Service{
-		store:  store,
-		worker: NewNotificationWorker(store, providers, log, defaultWorkerConcurrency),
-		log:    log,
-	}
+	return &Service{store: store, worker: worker, log: log}
 }
 
-func (service *Service) Start(ctx context.Context) {
-	service.worker.Start(ctx)
+func (s *Service) Start(ctx context.Context) {
+	s.worker.Start(ctx)
 }
 
-func (service *Service) Done() <-chan struct{} {
-	return service.worker.Done()
+func (s *Service) Done() <-chan struct{} {
+	return s.worker.Done()
 }
 
-func (service *Service) EnqueueEmail(ctx context.Context, task NotificationTask) error {
-	task.Provider = "email"
-	if task.EventType == "" || task.Recipient == "" || task.Subject == "" {
-		return fmt.Errorf("notification task requires event_type, recipient, and subject")
-	}
-
-	if err := service.store.CreateJob(ctx, task, 5); err != nil {
-		service.log.Error("failed to create notification job", "event_type", task.EventType, "recipient", task.Recipient, "error", err)
-		return err
-	}
-
-	return nil
+// EnqueueEmail queues a transactional email (invites, password resets).
+func (s *Service) EnqueueEmail(ctx context.Context, task Task) error {
+	return s.enqueueEmail(ctx, task, PriorityNormal)
 }
 
-func (service *Service) EnqueueHighPriorityEmail(ctx context.Context, task NotificationTask) error {
-	task.Provider = "email"
-	if task.EventType == "" || task.Recipient == "" || task.Subject == "" {
-		return fmt.Errorf("notification task requires event_type, recipient, and subject")
-	}
-
-	if task.Priority == 0 {
-		task.Priority = 10
-	}
-
+// EnqueueHighPriorityEmail queues an alert email ahead of transactional mail.
+// Tasks with a ReferenceID are enqueued at most once per recipient and event.
+func (s *Service) EnqueueHighPriorityEmail(ctx context.Context, task Task) error {
 	if task.ReferenceID != "" {
-		exists, err := service.store.ExistsByReference(ctx, task.ReferenceID, task.Recipient, task.EventType)
+		exists, err := s.store.ExistsByReference(ctx, task.ReferenceID, task.Recipient, task.EventType)
 		if err != nil {
-			return server.Internal(err)
+			return fmt.Errorf("check duplicate notification: %w", err)
 		}
 		if exists {
-			service.log.Info("duplicate alert notification skipped", "event_type", task.EventType, "recipient", task.Recipient, "reference_id", task.ReferenceID)
+			s.log.InfoContext(ctx, "duplicate alert notification skipped", "event_type", task.EventType, "reference_id", task.ReferenceID)
 			return nil
 		}
 	}
+	return s.enqueueEmail(ctx, task, PriorityHigh)
+}
 
-	if err := service.store.CreateJob(ctx, task, 5); err != nil {
-		service.log.Error("failed to create high-priority notification job", "event_type", task.EventType, "recipient", task.Recipient, "error", err)
-		return err
+func (s *Service) enqueueEmail(ctx context.Context, task Task, defaultPriority int) error {
+	if task.EventType == "" || task.Recipient == "" || task.Subject == "" {
+		return errTaskIncomplete
 	}
-
+	task.Provider = ChannelEmail
+	if task.Priority == 0 {
+		task.Priority = defaultPriority
+	}
+	if err := s.store.CreateJob(ctx, task, DefaultMaxAttempts); err != nil {
+		s.log.ErrorContext(ctx, "failed to create notification job", "event_type", task.EventType, "error", err)
+		return fmt.Errorf("create notification job: %w", err)
+	}
 	return nil
 }
 
-func (service *Service) RecordEvent(ctx context.Context, event Event) (*Event, error) {
+// RecordEvent stores an in-app notification event.
+func (s *Service) RecordEvent(ctx context.Context, event Event) (*Event, error) {
 	if event.Status == "" {
 		event.Status = StatusPending
 	}
 	if event.Channel == "" {
 		event.Channel = ChannelInApp
 	}
-
-	created, err := service.store.CreateEvent(ctx, event)
+	created, err := s.store.CreateEvent(ctx, event)
 	if err != nil {
-		return nil, server.Internal(err)
+		return nil, fmt.Errorf("record notification event: %w", err)
 	}
-
-	service.log.Info("notification event recorded", "event_id", created.ID, "event_type", created.EventType, "channel", created.Channel)
+	s.log.InfoContext(ctx, "notification event recorded", "event_id", created.ID, "event_type", created.EventType, "channel", created.Channel)
 	return created, nil
 }

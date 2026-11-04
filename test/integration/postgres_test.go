@@ -7,13 +7,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Maitrimodii/apm_master/internal/database"
-	"github.com/Maitrimodii/apm_master/internal/ingest/writer"
-	"github.com/Maitrimodii/apm_master/internal/log"
-	"github.com/Maitrimodii/apm_master/internal/metric"
-	"github.com/Maitrimodii/apm_master/internal/trace"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Maitrimodii/apm_master/internal/ingest/writer"
+	"github.com/Maitrimodii/apm_master/internal/logs"
+	"github.com/Maitrimodii/apm_master/internal/metrics"
+	"github.com/Maitrimodii/apm_master/internal/platform/pg"
+	"github.com/Maitrimodii/apm_master/internal/traces"
 )
 
 const integrationDSNEnv = "APM_INTEGRATION_DSN"
@@ -35,7 +36,7 @@ func integrationPool(testRunner *testing.T) *pgxpool.Pool {
 	defer cancel()
 
 	dsn := integrationDSN(testRunner)
-	if err := database.Migrate(dsn, "../../migrations"); err != nil {
+	if err := pg.Migrate(dsn, "../../migrations"); err != nil {
 		testRunner.Fatalf("db.Migrate() error = %v", err)
 	}
 
@@ -86,7 +87,7 @@ func TestTelemetryRoundTrip(testRunner *testing.T) {
 	spanID := "span-" + uuid.NewString()
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
-	if err := writer.NewSpanWriter(pool).BulkInsert(ctx, []trace.Span{{
+	if err := writer.NewSpanWriter(pool).BulkInsert(ctx, []traces.Span{{
 		SpanID:        spanID,
 		TraceID:       traceID,
 		OrgID:         orgID,
@@ -99,13 +100,13 @@ func TestTelemetryRoundTrip(testRunner *testing.T) {
 		StatusCode:    "OK",
 		ResourceAttrs: map[string]any{"service.name": "checkout"},
 		SpanAttrs:     map[string]any{"http.method": "POST"},
-		Events:        []trace.SpanEvent{},
-		Links:         []trace.SpanLink{},
+		Events:        []traces.SpanEvent{},
+		Links:         []traces.SpanLink{},
 	}}); err != nil {
 		testRunner.Fatalf("insert span: %v", err)
 	}
 
-	gotTrace, err := trace.NewStore(pool).GetTrace(ctx, orgID, traceID)
+	gotTrace, err := traces.NewStore(pool).GetTrace(ctx, orgID, traceID)
 	if err != nil {
 		testRunner.Fatalf("GetTrace() error = %v", err)
 	}
@@ -114,7 +115,7 @@ func TestTelemetryRoundTrip(testRunner *testing.T) {
 	}
 
 	logTraceID := traceID
-	if err := writer.NewLogWriter(pool).BulkInsert(ctx, []log.LogRecord{{
+	if err := writer.NewLogWriter(pool).BulkInsert(ctx, []logs.LogRecord{{
 		Time:          now,
 		OrgID:         orgID,
 		ServiceName:   "checkout",
@@ -128,8 +129,8 @@ func TestTelemetryRoundTrip(testRunner *testing.T) {
 		testRunner.Fatalf("insert log: %v", err)
 	}
 
-	gotLogs, _, err := log.NewStore(pool).ListLogs(ctx, log.ListLogsQuery{
-		OrgID:   orgID.String(),
+	gotLogs, _, err := logs.NewStore(pool).ListLogs(ctx, logs.ListFilter{
+		OrgID:   orgID,
 		TraceID: traceID,
 		Limit:   10,
 	})
@@ -140,16 +141,16 @@ func TestTelemetryRoundTrip(testRunner *testing.T) {
 		testRunner.Fatalf("ListLogs() returned %+v, want payment timeout", gotLogs)
 	}
 
-	if err := writer.NewMetricWriter(pool).BulkInsert(ctx, []metric.WriteBatch{{
-		Metrics: []metric.Metric{{
+	if err := writer.NewMetricWriter(pool).BulkInsert(ctx, []metrics.WriteBatch{{
+		Metrics: []metrics.Metric{{
 			Time:       now,
 			OrgID:      orgID,
 			MetricName: "checkout.latency",
-			MetricType: metric.MetricTypeGauge,
+			MetricType: metrics.MetricTypeGauge,
 			Value:      42,
 			Labels:     map[string]any{"service.name": "checkout"},
 		}},
-		Buckets: []metric.HistogramBucket{{
+		Buckets: []metrics.HistogramBucket{{
 			Time:       now,
 			OrgID:      orgID,
 			MetricName: "checkout.latency",
@@ -161,7 +162,7 @@ func TestTelemetryRoundTrip(testRunner *testing.T) {
 		testRunner.Fatalf("insert metric: %v", err)
 	}
 
-	points, _, err := metric.NewStore(pool).GetSeries(ctx, metric.SeriesQuery{
+	points, _, err := metrics.NewStore(pool).GetSeries(ctx, metrics.SeriesQuery{
 		OrgID:      orgID,
 		MetricName: "checkout.latency",
 		From:       now.Add(-time.Minute),

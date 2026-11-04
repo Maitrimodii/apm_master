@@ -1,157 +1,70 @@
 package ingest
 
 import (
-	"github.com/Maitrimodii/apm_master/internal/ingest/otlp"
-	"github.com/Maitrimodii/apm_master/internal/ingest/services"
-	"github.com/Maitrimodii/apm_master/internal/server"
-	"github.com/Maitrimodii/apm_master/internal/server/middleware"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+
+	"github.com/Maitrimodii/apm_master/internal/ingest/otlp"
+	"github.com/Maitrimodii/apm_master/internal/ingest/services"
+	"github.com/Maitrimodii/apm_master/internal/platform/apperr"
+	"github.com/Maitrimodii/apm_master/internal/platform/httpx"
+	"github.com/Maitrimodii/apm_master/internal/platform/middleware"
 )
 
-// Handler receives all OTel signals over HTTP.
-// Each signal has its own pipeline — they are independently buffered,
-// independently flushed, and independently writable.
+// Handler accepts OTLP-style JSON telemetry authenticated by API key.
 type Handler struct {
-	service         *services.Service
-	identityService middleware.APIKeyValidator
+	service *services.Service
+	apiKeys middleware.APIKeyValidator
 }
 
-func NewHandler(
-	service *services.Service,
-	identityService middleware.APIKeyValidator,
-) *Handler {
-	return &Handler{
-		service:         service,
-		identityService: identityService,
-	}
+func NewHandler(service *services.Service, apiKeys middleware.APIKeyValidator) *Handler {
+	return &Handler{service: service, apiKeys: apiKeys}
 }
 
-func (handler *Handler) RegisterRoutes(
-	routerGroup *gin.RouterGroup,
-) {
-	ingest := routerGroup.Group("/ingest")
-
-	ingest.Use(
-		middleware.APIKeyAuth(
-			handler.identityService,
-		),
-	)
-
-	ingest.POST(
-		"/traces",
-		handler.Traces,
-	)
-
-	ingest.POST(
-		"/logs",
-		handler.Logs,
-	)
-
-	ingest.POST(
-		"/metrics",
-		handler.Metrics,
-	)
+func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
+	g := rg.Group("/ingest", middleware.APIKeyAuth(h.apiKeys))
+	g.POST("/traces", h.Traces)
+	g.POST("/logs", h.Logs)
+	g.POST("/metrics", h.Metrics)
 }
 
-func (handler *Handler) Traces(
-	ginContext *gin.Context,
-) {
-	orgID, err := parseOrgID(ginContext)
-	if err != nil {
-		server.Handle(ginContext, err)
-		return
-	}
-
+func (h *Handler) Traces(c *gin.Context) {
 	var req otlp.IngestRequest
-
-	if err := ginContext.ShouldBindJSON(
-		&req,
-	); err != nil {
-
-		server.Handle(
-			ginContext,
-			server.BadRequest(
-				server.CodeInvalidPayload,
-				"invalid request body",
-			),
-		)
-		return
-	}
-
-	resp, err := handler.service.IngestTraces(
-		ginContext.Request.Context(),
-		orgID,
-		req,
-	)
-	if err != nil {
-		server.Handle(ginContext, err)
-		return
-	}
-
-	server.OK(ginContext, resp)
+	ingest(c, &req, func(org uuid.UUID) (*otlp.IngestResponse, error) {
+		return h.service.IngestTraces(c.Request.Context(), org, req)
+	})
 }
 
-func (handler *Handler) Logs(
-	ginContext *gin.Context,
-) {
-	orgID, err := parseOrgID(ginContext)
-	if err != nil {
-		server.Handle(ginContext, err)
-		return
-	}
-
+func (h *Handler) Logs(c *gin.Context) {
 	var req otlp.IngestLogsRequest
-	if err := ginContext.ShouldBindJSON(&req); err != nil {
-		server.Handle(ginContext, server.BadRequest(server.CodeInvalidPayload, "invalid request body"))
-		return
-	}
-
-	res, err := handler.service.IngestLogs(
-		ginContext.Request.Context(),
-		orgID,
-		req,
-	)
-	if err != nil {
-		server.Handle(ginContext, err)
-		return
-	}
-
-	server.OK(ginContext, res)
+	ingest(c, &req, func(org uuid.UUID) (*otlp.IngestResponse, error) {
+		return h.service.IngestLogs(c.Request.Context(), org, req)
+	})
 }
 
-func (handler *Handler) Metrics(
-	ginContext *gin.Context,
-) {
-	orgID, err := parseOrgID(ginContext)
-	if err != nil {
-		server.Handle(ginContext, err)
-		return
-	}
-
+func (h *Handler) Metrics(c *gin.Context) {
 	var req otlp.IngestMetricsRequest
-	if err := ginContext.ShouldBindJSON(&req); err != nil {
-		server.Handle(ginContext, server.BadRequest(server.CodeInvalidPayload, "invalid request body"))
-		return
-	}
-
-	resp, err := handler.service.IngestMetrics(
-		ginContext.Request.Context(),
-		orgID,
-		req,
-	)
-	if err != nil {
-		server.Handle(ginContext, err)
-		return
-	}
-
-	server.OK(ginContext, resp)
+	ingest(c, &req, func(org uuid.UUID) (*otlp.IngestResponse, error) {
+		return h.service.IngestMetrics(c.Request.Context(), org, req)
+	})
 }
 
-func parseOrgID(ginContext *gin.Context) (uuid.UUID, error) {
-	orgID, err := uuid.Parse(ginContext.GetString("org_id"))
-	if err != nil {
-		return uuid.UUID{}, server.Unauthorized(server.CodeInvalidToken, "missing or invalid org_id")
+// ingest binds the request body into req, then runs the signal's ingest call
+// for the authenticated org.
+func ingest(c *gin.Context, req any, run func(org uuid.UUID) (*otlp.IngestResponse, error)) {
+	orgID, apiErr := httpx.OrgID(c)
+	if apiErr != nil {
+		httpx.Handle(c, apiErr)
+		return
 	}
-	return orgID, nil
+	if err := c.ShouldBindJSON(req); err != nil {
+		httpx.Handle(c, apperr.BadRequest(apperr.CodeInvalidPayload, "invalid request body"))
+		return
+	}
+	resp, err := run(orgID)
+	if err != nil {
+		httpx.Handle(c, err)
+		return
+	}
+	httpx.OK(c, resp)
 }

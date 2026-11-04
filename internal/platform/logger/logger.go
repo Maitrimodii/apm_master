@@ -1,0 +1,122 @@
+package logger
+
+import (
+	"context"
+	"io"
+	"log/slog"
+	"os"
+	"strings"
+
+	"github.com/Maitrimodii/apm_master/internal/platform/ctxkeys"
+)
+
+// levelVar allows runtime level changes (e.g. via an admin endpoint).
+var levelVar = new(slog.LevelVar)
+
+// sensitiveKeys are redacted from every log record; add more with WithRedactedKeys.
+var sensitiveKeys = []string{
+	"recipient",
+	"email",
+	"token",
+	"password",
+	"api_key",
+	"access_token",
+	"refresh_token",
+	"key",
+	"password_hash",
+	"token_hash",
+	"key_hash",
+}
+
+type Option func(*config)
+
+type config struct {
+	writer     io.Writer
+	textFormat bool
+	redact     []string // attr keys to redact
+}
+
+func WithWriter(w io.Writer) Option { return func(c *config) { c.writer = w } }
+func WithTextFormat() Option        { return func(c *config) { c.textFormat = true } }
+func WithRedactedKeys(keys ...string) Option {
+	return func(c *config) { c.redact = append(c.redact, keys...) }
+}
+
+type ContextHandler struct {
+	slog.Handler
+}
+
+func (h *ContextHandler) Handle(ctx context.Context, logRecord slog.Record) error {
+	if ctx != nil {
+		if reqID := ctxkeys.RequestID(ctx); reqID != "" {
+			logRecord.AddAttrs(slog.String("request_id", reqID))
+		}
+		if corrID := ctxkeys.CorrelationID(ctx); corrID != "" {
+			logRecord.AddAttrs(slog.String("correlation_id", corrID))
+		}
+		if orgID := ctxkeys.OrgID(ctx); orgID != "" {
+			logRecord.AddAttrs(slog.String("org_id", orgID))
+		}
+	}
+	return h.Handler.Handle(ctx, logRecord)
+}
+
+// New builds the application logger used by HTTP, ingest, and startup code.
+func New(serviceName, env, level string, opts ...Option) *slog.Logger {
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(level)); err != nil {
+		lvl = slog.LevelInfo // fallback, don't fail startup over a bad config value
+	}
+	levelVar.Set(lvl)
+
+	cfg := &config{
+		writer: os.Stdout,
+		redact: append([]string{}, sensitiveKeys...),
+	}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	handlerOpts := &slog.HandlerOptions{
+		AddSource:   lvl <= slog.LevelDebug, // only pay stack-walk cost when debugging
+		Level:       levelVar,
+		ReplaceAttr: redactor(cfg.redact),
+	}
+
+	var handler slog.Handler
+	if cfg.textFormat {
+		handler = slog.NewTextHandler(cfg.writer, handlerOpts)
+	} else {
+		handler = slog.NewJSONHandler(cfg.writer, handlerOpts)
+	}
+
+	return slog.New(
+		&ContextHandler{Handler: handler},
+	).With(
+		"service", serviceName,
+		"env", env,
+	)
+}
+
+// SetLevel allows runtime adjustment, e.g. from an admin/debug HTTP endpoint.
+func SetLevel(level string) error {
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(level)); err != nil {
+		return err
+	}
+	levelVar.Set(lvl)
+	return nil
+}
+
+func redactor(keys []string) func([]string, slog.Attr) slog.Attr {
+	set := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		set[strings.ToLower(k)] = true
+	}
+	return func(groups []string, a slog.Attr) slog.Attr {
+		if set[strings.ToLower(a.Key)] {
+			return slog.String(a.Key, "[REDACTED]")
+		}
+		return a
+	}
+}

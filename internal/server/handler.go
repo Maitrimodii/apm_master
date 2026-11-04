@@ -41,30 +41,30 @@ func NewAPIHandler(
 
 // RegisterRoutes registers all routes under RoutePrefixAPIV1.
 // Each domain module is explicitly invoked by name so all active routes are visible at a glance.
-func (handler *APIHandler) RegisterRoutes(router *gin.Engine) {
+func (h *APIHandler) RegisterRoutes(router *gin.Engine) {
 	api := router.Group(RoutePrefixAPIV1)
 
 	// Explicit module registrations
-	if handler.Auth != nil {
-		handler.Auth.RegisterRoutes(api)
+	if h.Auth != nil {
+		h.Auth.RegisterRoutes(api)
 	}
-	if handler.Ingest != nil {
-		handler.Ingest.RegisterRoutes(api)
+	if h.Ingest != nil {
+		h.Ingest.RegisterRoutes(api)
 	}
-	if handler.Trace != nil {
-		handler.Trace.RegisterRoutes(api)
+	if h.Trace != nil {
+		h.Trace.RegisterRoutes(api)
 	}
-	if handler.Log != nil {
-		handler.Log.RegisterRoutes(api)
+	if h.Log != nil {
+		h.Log.RegisterRoutes(api)
 	}
-	if handler.Metric != nil {
-		handler.Metric.RegisterRoutes(api)
+	if h.Metric != nil {
+		h.Metric.RegisterRoutes(api)
 	}
-	if handler.Alert != nil {
-		handler.Alert.RegisterRoutes(api)
+	if h.Alert != nil {
+		h.Alert.RegisterRoutes(api)
 	}
-	if handler.Investigation != nil {
-		handler.Investigation.RegisterRoutes(api)
+	if h.Investigation != nil {
+		h.Investigation.RegisterRoutes(api)
 	}
 }
 
@@ -83,10 +83,10 @@ func NewInternalHandler(
 }
 
 // RegisterRoutes registers all internal routes under RoutePrefixInternalV1.
-func (handler *InternalHandler) RegisterRoutes(router *gin.Engine) {
+func (h *InternalHandler) RegisterRoutes(router *gin.Engine) {
 	internal := router.Group(RoutePrefixInternalV1)
 
-	if handler.Investigation != nil {
-		handler.Investigation.RegisterRoutes(internal)
+	if h.Investigation != nil {
+		h.Investigation.RegisterRoutes(internal)
 	}
 }

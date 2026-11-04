@@ -1,794 +1,204 @@
+// Package config loads apm_master settings from environment variables (and an
+// optional .env file). Each setting is declared once, as a tagged field:
+// `env` is the variable name and `envDefault` its default. Durations named
+// *_MS are integer milliseconds.
 package config
 
 import (
-	"bufio"
-	"errors"
 	"fmt"
-	"os"
-	"strconv"
 	"strings"
 	"time"
-
-	"github.com/Maitrimodii/apm_master/internal/database"
 )
+
+// AppMode selects which components a process runs.
+type AppMode string
 
 const (
-	envAppURL   = "APPURL"
-	envAppEnv   = "APP_ENV"
-	envAppMode  = "APP_MODE"
-	envLogLevel = "LOG_LEVEL"
-
-	envHTTPPort          = "HTTP_PORT"
-	envHTTPReadTimeout   = "HTTP_READ_TIMEOUT_MS"
-	envHTTPWriteTimeout  = "HTTP_WRITE_TIMEOUT_MS"
-	envHTTPIdleTimeout   = "HTTP_IDLE_TIMEOUT_MS"
-	envHTTPHeaderTimeout = "HTTP_HEADER_TIMEOUT_MS"
-	envMaxBodyBytes      = "MAX_BODY_BYTES"
-
-	envPostgresHost     = "POSTGRES_HOST"
-	envRedisURL         = "REDIS_URL"
-	envPostgresPort     = "POSTGRES_PORT"
-	envPostgresUser     = "POSTGRES_USER"
-	envPostgresPassword = "POSTGRES_PASSWORD"
-	envPostgresDBName          = "POSTGRES_DB"
-	envPostgresTimeout         = "POSTGRES_TIMEOUT_MS"
-	envPostgresMaxConns        = "POSTGRES_MAX_CONNS"
-	envPostgresMinConns        = "POSTGRES_MIN_CONNS"
-	envPostgresMaxConnIdleTime = "POSTGRES_MAX_CONN_IDLE_TIME_MS"
-	envPostgresMaxConnLifetime = "POSTGRES_MAX_CONN_LIFETIME_MS"
-	envRedisTimeout            = "REDIS_TIMEOUT_MS"
-
-	envJWTSecret               = "JWT_SECRET"
-	envAccessTokenExpiryMins   = "ACCESS_TOKEN_EXPIRY_MINS"
-	envRefreshTokenExpiryDays  = "REFRESH_TOKEN_EXPIRY_DAYS"
-	envInviteExpiryDays        = "INVITE_EXPIRY_DAYS"
-	envPasswordResetExpiryMins = "PASSWORD_RESET_EXPIRY_MINS"
-
-	envEmailFrom    = "EMAIL_FROM"
-	envSMTPHost     = "SMTP_HOST"
-	envSMTPPort     = "SMTP_PORT"
-	envSMTPUsername = "SMTP_USERNAME"
-	envSMTPPassword = "SMTP_PASSWORD"
-
-	envKafkaBrokers                = "KAFKA_BROKERS"
-	envKafkaClientID               = "KAFKA_CLIENT_ID"
-	envKafkaConsumerGroup          = "KAFKA_CONSUMER_GROUP"
-	envKafkaTracesTopic            = "KAFKA_TRACES_TOPIC"
-	envKafkaLogsTopic              = "KAFKA_LOGS_TOPIC"
-	envKafkaMetricsTopic           = "KAFKA_METRICS_TOPIC"
-	envKafkaTracesDLQTopic         = "KAFKA_TRACES_DLQ_TOPIC"
-	envKafkaLogsDLQTopic           = "KAFKA_LOGS_DLQ_TOPIC"
-	envKafkaMetricsDLQTopic        = "KAFKA_METRICS_DLQ_TOPIC"
-	envKafkaTopicPartitions        = "KAFKA_TOPIC_PARTITIONS"
-	envKafkaTopicReplicationFactor = "KAFKA_TOPIC_REPLICATION_FACTOR"
-	envKafkaTopicRetention         = "KAFKA_TOPIC_RETENTION_MS"
-	envKafkaCompression            = "KAFKA_COMPRESSION"
-	envKafkaProducerBatchSize      = "KAFKA_PRODUCER_BATCH_SIZE"
-	envKafkaProducerBatchBytes     = "KAFKA_PRODUCER_BATCH_BYTES"
-	envKafkaProducerBatchTimeout   = "KAFKA_PRODUCER_BATCH_TIMEOUT_MS"
-	envKafkaProducerWriteTimeout   = "KAFKA_PRODUCER_WRITE_TIMEOUT_MS"
-	envKafkaProducerRequiredAcks   = "KAFKA_PRODUCER_REQUIRED_ACKS"
-	envKafkaProducerMaxAttempts    = "KAFKA_PRODUCER_MAX_ATTEMPTS"
-	envKafkaConsumerWorkers        = "KAFKA_CONSUMER_WORKERS"
-	envKafkaConsumerBatchRecords   = "KAFKA_CONSUMER_BATCH_RECORDS"
-	envKafkaConsumerBatchBytes     = "KAFKA_CONSUMER_BATCH_BYTES"
-	envKafkaConsumerFlushInterval  = "KAFKA_CONSUMER_FLUSH_INTERVAL_MS"
-	envKafkaConsumerReadMaxBytes   = "KAFKA_CONSUMER_READ_MAX_BYTES"
-	envKafkaConsumerMaxAttempts    = "KAFKA_CONSUMER_MAX_ATTEMPTS"
-	envKafkaConsumerRetryInitial   = "KAFKA_CONSUMER_RETRY_INITIAL_MS"
-	envKafkaConsumerRetryMax       = "KAFKA_CONSUMER_RETRY_MAX_MS"
-	envAlertEvaluationInterval     = "ALERT_EVALUATION_INTERVAL_MS"
-	envRateLimitLimit              = "RATE_LIMIT_LIMIT"
-	envRateLimitBurst              = "RATE_LIMIT_BURST"
-	envRateLimitWindow             = "RATE_LIMIT_WINDOW_MS"
-	envTelemetryRetentionDays      = "TELEMETRY_RETENTION_DAYS"
-	envNotificationRetentionDays   = "NOTIFICATION_RETENTION_DAYS"
-	envRefreshTokenRetentionDays   = "REFRESH_TOKEN_RETENTION_DAYS"
-
-	envKafkaAIInvestigationTopic         = "KAFKA_AI_INVESTIGATION_TOPIC"
-	envKafkaAIRetryTopic                 = "KAFKA_AI_RETRY_TOPIC"
-	envKafkaAIDLQTopic                   = "KAFKA_AI_DLQ_TOPIC"
-	envAIServiceToken                    = "AI_SERVICE_TOKEN"
-	envInvestigationOutboxPollIntervalMS = "INVESTIGATION_OUTBOX_POLL_INTERVAL_MS"
-	envInvestigationOutboxBatchSize      = "INVESTIGATION_OUTBOX_BATCH_SIZE"
-
-	defaultAppURL   = "http://localhost:3000"
-	defaultAppEnv   = "development"
-	defaultAppMode  = "all"
-	defaultLogLevel = "info"
-
-	defaultHTTPPort            = "8080"
-	defaultHTTPReadTimeoutMS   = 10000
-	defaultHTTPWriteTimeoutMS  = 30000
-	defaultHTTPIdleTimeoutMS   = 120000
-	defaultHTTPHeaderTimeoutMS = 5000
-	defaultMaxBodyBytes        = 10 * 1024 * 1024
-
-	defaultPostgresHost      = "localhost"
-	defaultRedisURL          = "localhost:6379"
-	defaultPostgresPort      = "5432"
-	defaultPostgresUser      = "apm_user"
-	defaultPostgresPassword  = ""
-	defaultPostgresDBName            = "apm_db"
-	defaultPostgresTimeoutMS         = 5000
-	defaultPostgresMaxConns          = 50
-	defaultPostgresMinConns          = 5
-	defaultPostgresMaxConnIdleTimeMS = 15 * 60 * 1000
-	defaultPostgresMaxConnLifetimeMS = 60 * 60 * 1000
-	defaultRedisTimeoutMS            = 5000
-
-	defaultJWTSecret               = ""
-	defaultAccessTokenExpiryMins   = 15
-	defaultRefreshTokenExpiryDays  = 7
-	defaultInviteExpiryDays        = 10
-	defaultPasswordResetExpiryMins = 30
-
-	defaultEmailFrom    = "no-reply@apm-master.local"
-	defaultSMTPHost     = ""
-	defaultSMTPPort     = "587"
-	defaultSMTPUsername = ""
-	defaultSMTPPassword = ""
-
-	defaultKafkaBrokers                 = "localhost:9092"
-	defaultKafkaClientID                = "apm-master-ingest"
-	defaultKafkaConsumerGroup           = "apm-master-ingest-writers"
-	defaultKafkaTracesTopic             = "apm.telemetry.trace.v1"
-	defaultKafkaLogsTopic               = "apm.telemetry.log.v1"
-	defaultKafkaMetricsTopic            = "apm.telemetry.metric.v1"
-	defaultKafkaTracesDLQTopic          = "apm.telemetry.trace.dlq.v1"
-	defaultKafkaLogsDLQTopic            = "apm.telemetry.log.dlq.v1"
-	defaultKafkaMetricsDLQTopic         = "apm.telemetry.metric.dlq.v1"
-	defaultKafkaTopicPartitions         = 12
-	defaultKafkaTopicReplicationFactor  = 1
-	defaultKafkaTopicRetentionMS        = 604800000
-	defaultKafkaCompression             = "lz4"
-	defaultKafkaProducerBatchSize       = 1000
-	defaultKafkaProducerBatchBytes      = 1048576
-	defaultKafkaProducerBatchTimeoutMS  = 10
-	defaultKafkaProducerWriteTimeoutMS  = 10000
-	defaultKafkaProducerRequiredAcks    = -1
-	defaultKafkaProducerMaxAttempts     = 10
-	defaultKafkaConsumerWorkers         = 3
-	defaultKafkaConsumerBatchRecords    = 1000
-	defaultKafkaConsumerBatchBytes      = 4194304
-	defaultKafkaConsumerFlushIntervalMS = 1000
-	defaultKafkaConsumerReadMaxBytes    = 10485760
-	defaultKafkaConsumerMaxAttempts     = 5
-	defaultKafkaConsumerRetryInitialMS  = 250
-	defaultKafkaConsumerRetryMaxMS      = 5000
-	defaultAlertEvaluationIntervalMS    = 60000
-	defaultRateLimitLimit               = 100.0
-	defaultRateLimitBurst               = 200
-	defaultRateLimitWindowMS            = 1000
-	defaultTelemetryRetentionDays       = 30
-	defaultNotificationRetentionDays    = 90
-	defaultRefreshTokenRetentionDays    = 30
-
-	defaultKafkaAIInvestigationTopic         = "ai.investigation.jobs"
-	defaultKafkaAIRetryTopic                 = "ai.investigation.retry"
-	defaultKafkaAIDLQTopic                   = "ai.investigation.dlq"
-	defaultAIServiceToken                    = "apm-ai-secret-token-change-in-production"
-	defaultInvestigationOutboxPollIntervalMS = 2000
-	defaultInvestigationOutboxBatchSize      = 50
+	// ModeAll runs the API, ingest consumers and the scheduler in one process.
+	ModeAll AppMode = "all"
+	// ModeAPI runs the API and ingest consumers only.
+	ModeAPI AppMode = "api"
+	// ModeScheduler runs alert evaluation and retention only.
+	ModeScheduler AppMode = "scheduler"
 )
 
-// ServerConfig groups HTTP and operational service configuration.
-type ServerConfig struct {
-	AppURL            string
-	AppEnv            string
-	AppMode           string
-	LogLevel          string
-	HTTPPort          string
-	HTTPReadTimeout   time.Duration
-	HTTPWriteTimeout  time.Duration
-	HTTPIdleTimeout   time.Duration
-	HTTPHeaderTimeout time.Duration
-	MaxBodyBytes      int64
-	RateLimitLimit    float64
-	RateLimitBurst    int
-	RateLimitWindow   time.Duration
-}
+// RunsScheduler reports whether background tasks run in this process.
+func (m AppMode) RunsScheduler() bool { return m == ModeAll || m == ModeScheduler }
 
-// DatabaseConfig groups PostgreSQL, TimescaleDB, and Redis storage settings.
-type DatabaseConfig struct {
-	PostgresHost            string
-	PostgresPort            string
-	PostgresUser            string
-	PostgresPassword        string
-	PostgresDBName          string
-	PostgresTimeout         time.Duration
-	PostgresMaxConns        int32
-	PostgresMinConns        int32
-	PostgresMaxConnIdleTime time.Duration
-	PostgresMaxConnLifetime time.Duration
-	RedisURL                string
-	RedisTimeout            time.Duration
-}
+// EnvDevelopment is the APP_ENV for local development.
+const EnvDevelopment = "development"
 
-// KafkaConfig groups Kafka ingestion and AI investigation messaging topics.
-type KafkaConfig struct {
-	Brokers                      string
-	ClientID                     string
-	ConsumerGroup                string
-	TracesTopic                  string
-	LogsTopic                    string
-	MetricsTopic                 string
-	TracesDLQTopic               string
-	LogsDLQTopic                 string
-	MetricsDLQTopic              string
-	TopicPartitions              int
-	TopicReplicationFactor       int
-	TopicRetention               time.Duration
-	Compression                  string
-	ProducerBatchSize            int
-	ProducerBatchBytes           int
-	ProducerBatchTimeout         time.Duration
-	ProducerWriteTimeout         time.Duration
-	ProducerRequiredAcks         int
-	ProducerMaxAttempts          int
-	ConsumerWorkers              int
-	ConsumerBatchRecords         int
-	ConsumerBatchBytes           int
-	ConsumerFlushInterval        time.Duration
-	ConsumerReadMaxBytes         int
-	ConsumerMaxAttempts          int
-	ConsumerRetryInitial         time.Duration
-	ConsumerRetryMax             time.Duration
-	AIInvestigationTopic         string
-	AIRetryTopic                 string
-	AIDLQTopic                   string
-	InvestigationOutboxPoll      time.Duration
-	InvestigationOutboxBatchSize int
-}
+// PlaceholderServiceToken is the example AI_SERVICE_TOKEN; it is rejected
+// outside development.
+const PlaceholderServiceToken = "apm-ai-secret-token-change-in-production"
 
-// AuthConfig groups security tokens, passwords, and invite duration settings.
-type AuthConfig struct {
-	JWTSecret               string
-	AccessTokenExpiryMins   int
-	RefreshTokenExpiryDays  int
-	InviteExpiryDays        int
-	PasswordResetExpiryMins int
-	AIServiceToken          string
-}
-
-// Config holds all configuration values for the application, organizing them both
-// by domain-specific sub-configs and top-level fields for backwards compatibility.
 type Config struct {
-	// Domain-specific configurations
-	Server   ServerConfig
-	Database DatabaseConfig
-	Kafka    KafkaConfig
-	Auth     AuthConfig
-
-	AppUrl   string
-	AppEnv   string
-	AppMode  string
-	LogLevel string
-
-	// Server settings
-	HTTPPort          string
-	HTTPReadTimeout   time.Duration
-	HTTPWriteTimeout  time.Duration
-	HTTPIdleTimeout   time.Duration
-	HTTPHeaderTimeout time.Duration
-	MaxBodyBytes      int64
-
-	// Database settings
-	PostgresHost            string
-	RedisURL                string
-	PostgresPort            string
-	PostgresUser            string
-	PostgresPassword        string
-	PostgresDBName          string
-	PostgresTimeout         time.Duration
-	PostgresMaxConns        int32
-	PostgresMinConns        int32
-	PostgresMaxConnIdleTime time.Duration
-	PostgresMaxConnLifetime time.Duration
-	RedisTimeout            time.Duration
-
-	// Auth settings
-	JWTSecret               string
-	AccessTokenExpiryMins   int
-	RefreshTokenExpiryDays  int
-	InviteExpiryDays        int
-	PasswordResetExpiryMins int
-
-	// Email settings
-	EmailFrom    string
-	SMTPHost     string
-	SMTPPort     string
-	SMTPUsername string
-	SMTPPassword string
-
-	KafkaBrokers                string
-	KafkaClientID               string
-	KafkaConsumerGroup          string
-	KafkaTracesTopic            string
-	KafkaLogsTopic              string
-	KafkaMetricsTopic           string
-	KafkaTracesDLQTopic         string
-	KafkaLogsDLQTopic           string
-	KafkaMetricsDLQTopic        string
-	KafkaTopicPartitions        int
-	KafkaTopicReplicationFactor int
-	KafkaTopicRetention         time.Duration
-	KafkaCompression            string
-	KafkaProducerBatchSize      int
-	KafkaProducerBatchBytes     int
-	KafkaProducerBatchTimeout   time.Duration
-	KafkaProducerWriteTimeout   time.Duration
-	KafkaProducerRequiredAcks   int
-	KafkaProducerMaxAttempts    int
-	KafkaConsumerWorkers        int
-	KafkaConsumerBatchRecords   int
-	KafkaConsumerBatchBytes     int
-	KafkaConsumerFlushInterval  time.Duration
-	KafkaConsumerReadMaxBytes   int
-	KafkaConsumerMaxAttempts    int
-	KafkaConsumerRetryInitial   time.Duration
-	KafkaConsumerRetryMax       time.Duration
-	AlertEvaluationInterval     time.Duration
-	RateLimitLimit              float64
-	RateLimitBurst              int
-	RateLimitWindow             time.Duration
-
-	// Retention settings — separate windows per data class
-	TelemetryRetentionDays    int // spans, metrics, log_records
-	NotificationRetentionDays int // notification_jobs, notification_events
-	RefreshTokenRetentionDays int // revoked/expired refresh_tokens
-
-	// AI Investigation settings
-	KafkaAIInvestigationTopic       string
-	KafkaAIRetryTopic               string
-	KafkaAIDLQTopic                 string
-	AIServiceToken                  string
-	InvestigationOutboxPollInterval time.Duration
-	InvestigationOutboxBatchSize    int
+	App       AppConfig
+	HTTP      HTTPConfig
+	Postgres  PostgresConfig
+	Redis     RedisConfig
+	Auth      AuthConfig
+	SMTP      SMTPConfig
+	Kafka     KafkaConfig
+	Alerting  AlertingConfig
+	Retention RetentionConfig
+	AI        AIConfig
 }
 
-func loadEnvFile() (err error) {
-	file, err := os.Open(".env")
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("open .env: %w", err)
-	}
-	defer func() {
-		if closeErr := file.Close(); closeErr != nil {
-			if err != nil {
-				err = errors.Join(err, fmt.Errorf("close .env: %w", closeErr))
-				return
-			}
-			err = fmt.Errorf("close .env: %w", closeErr)
-		}
-	}()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := strings.TrimSpace(parts[0])
-		val := strings.TrimSpace(parts[1])
-		if (strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"")) ||
-			(strings.HasPrefix(val, "'") && strings.HasSuffix(val, "'")) {
-			val = val[1 : len(val)-1]
-		}
-		if os.Getenv(key) == "" {
-			if err := os.Setenv(key, val); err != nil {
-				return fmt.Errorf("set environment variable %s from .env: %w", key, err)
-			}
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan .env: %w", err)
-	}
-
-	return nil
+type AppConfig struct {
+	Env      string  `env:"APP_ENV" envDefault:"development"`
+	Mode     AppMode `env:"APP_MODE" envDefault:"all"`
+	LogLevel string  `env:"LOG_LEVEL" envDefault:"info"`
+	// URL is the UI's base URL, used in email links. APP_URL wins over the
+	// older APPURL name.
+	URL string `env:"APPURL" envDefault:"http://localhost:3000"`
+	// AllowedOrigins are the browser origins allowed by CORS. Empty means URL.
+	AllowedOrigins []string `env:"CORS_ALLOWED_ORIGINS" envSeparator:","`
+	// AutoMigrate applies database migrations at startup. Defaults to true
+	// only in development; run cmd/migrate as a deploy step elsewhere.
+	AutoMigrate *bool `env:"AUTO_MIGRATE"`
 }
 
-// Load reads configuration from environment variables.
-// If an environment variable is not set, the default value is used.
-func Load() (*Config, error) {
-	if err := loadEnvFile(); err != nil {
-		return nil, err
+// IsDevelopment reports whether the process runs in local development.
+func (c AppConfig) IsDevelopment() bool { return strings.EqualFold(c.Env, EnvDevelopment) }
+
+// Origins returns the CORS allow-list.
+func (c AppConfig) Origins() []string {
+	if len(c.AllowedOrigins) > 0 {
+		return c.AllowedOrigins
 	}
-
-	appURL := os.Getenv("APP_URL")
-	if appURL == "" {
-		appURL = getEnv(envAppURL, defaultAppURL)
-	}
-
-	cfg := &Config{
-		AppUrl:   appURL,
-		AppEnv:   getEnv(envAppEnv, defaultAppEnv),
-		AppMode:  getEnv(envAppMode, defaultAppMode),
-		LogLevel: getEnv(envLogLevel, defaultLogLevel),
-
-		HTTPPort:          getEnv(envHTTPPort, defaultHTTPPort),
-		HTTPReadTimeout:   getEnvDurationMS(envHTTPReadTimeout, defaultHTTPReadTimeoutMS),
-		HTTPWriteTimeout:  getEnvDurationMS(envHTTPWriteTimeout, defaultHTTPWriteTimeoutMS),
-		HTTPIdleTimeout:   getEnvDurationMS(envHTTPIdleTimeout, defaultHTTPIdleTimeoutMS),
-		HTTPHeaderTimeout: getEnvDurationMS(envHTTPHeaderTimeout, defaultHTTPHeaderTimeoutMS),
-		MaxBodyBytes:      int64(getEnvInt(envMaxBodyBytes, defaultMaxBodyBytes)),
-
-		PostgresHost:     getEnv(envPostgresHost, defaultPostgresHost),
-		RedisURL:         getEnv(envRedisURL, defaultRedisURL),
-		PostgresPort:     getEnv(envPostgresPort, defaultPostgresPort),
-		PostgresUser:     getEnv(envPostgresUser, defaultPostgresUser),
-		PostgresPassword: getEnv(envPostgresPassword, defaultPostgresPassword),
-		PostgresDBName:          getEnv(envPostgresDBName, defaultPostgresDBName),
-		PostgresTimeout:         getEnvDurationMS(envPostgresTimeout, defaultPostgresTimeoutMS),
-		PostgresMaxConns:        int32(getEnvInt(envPostgresMaxConns, defaultPostgresMaxConns)),
-		PostgresMinConns:        int32(getEnvInt(envPostgresMinConns, defaultPostgresMinConns)),
-		PostgresMaxConnIdleTime: getEnvDurationMS(envPostgresMaxConnIdleTime, defaultPostgresMaxConnIdleTimeMS),
-		PostgresMaxConnLifetime: getEnvDurationMS(envPostgresMaxConnLifetime, defaultPostgresMaxConnLifetimeMS),
-		RedisTimeout:            getEnvDurationMS(envRedisTimeout, defaultRedisTimeoutMS),
-
-		JWTSecret:               getEnv(envJWTSecret, defaultJWTSecret),
-		AccessTokenExpiryMins:   getEnvInt(envAccessTokenExpiryMins, defaultAccessTokenExpiryMins),
-		RefreshTokenExpiryDays:  getEnvInt(envRefreshTokenExpiryDays, defaultRefreshTokenExpiryDays),
-		InviteExpiryDays:        getEnvInt(envInviteExpiryDays, defaultInviteExpiryDays),
-		PasswordResetExpiryMins: getEnvInt(envPasswordResetExpiryMins, defaultPasswordResetExpiryMins),
-
-		EmailFrom:    getEnv(envEmailFrom, defaultEmailFrom),
-		SMTPHost:     getEnv(envSMTPHost, defaultSMTPHost),
-		SMTPPort:     getEnv(envSMTPPort, defaultSMTPPort),
-		SMTPUsername: getEnv(envSMTPUsername, defaultSMTPUsername),
-		SMTPPassword: getEnv(envSMTPPassword, defaultSMTPPassword),
-
-		KafkaBrokers:                getEnv(envKafkaBrokers, defaultKafkaBrokers),
-		KafkaClientID:               getEnv(envKafkaClientID, defaultKafkaClientID),
-		KafkaConsumerGroup:          getEnv(envKafkaConsumerGroup, defaultKafkaConsumerGroup),
-		KafkaTracesTopic:            getEnv(envKafkaTracesTopic, defaultKafkaTracesTopic),
-		KafkaLogsTopic:              getEnv(envKafkaLogsTopic, defaultKafkaLogsTopic),
-		KafkaMetricsTopic:           getEnv(envKafkaMetricsTopic, defaultKafkaMetricsTopic),
-		KafkaTracesDLQTopic:         getEnv(envKafkaTracesDLQTopic, defaultKafkaTracesDLQTopic),
-		KafkaLogsDLQTopic:           getEnv(envKafkaLogsDLQTopic, defaultKafkaLogsDLQTopic),
-		KafkaMetricsDLQTopic:        getEnv(envKafkaMetricsDLQTopic, defaultKafkaMetricsDLQTopic),
-		KafkaTopicPartitions:        getEnvInt(envKafkaTopicPartitions, defaultKafkaTopicPartitions),
-		KafkaTopicReplicationFactor: getEnvInt(envKafkaTopicReplicationFactor, defaultKafkaTopicReplicationFactor),
-		KafkaTopicRetention:         getEnvDurationMS(envKafkaTopicRetention, defaultKafkaTopicRetentionMS),
-		KafkaCompression:            getEnv(envKafkaCompression, defaultKafkaCompression),
-		KafkaProducerBatchSize:      getEnvInt(envKafkaProducerBatchSize, defaultKafkaProducerBatchSize),
-		KafkaProducerBatchBytes:     getEnvInt(envKafkaProducerBatchBytes, defaultKafkaProducerBatchBytes),
-		KafkaProducerBatchTimeout:   getEnvDurationMS(envKafkaProducerBatchTimeout, defaultKafkaProducerBatchTimeoutMS),
-		KafkaProducerWriteTimeout:   getEnvDurationMS(envKafkaProducerWriteTimeout, defaultKafkaProducerWriteTimeoutMS),
-		KafkaProducerRequiredAcks:   getEnvInt(envKafkaProducerRequiredAcks, defaultKafkaProducerRequiredAcks),
-		KafkaProducerMaxAttempts:    getEnvInt(envKafkaProducerMaxAttempts, defaultKafkaProducerMaxAttempts),
-		KafkaConsumerWorkers:        getEnvInt(envKafkaConsumerWorkers, defaultKafkaConsumerWorkers),
-		KafkaConsumerBatchRecords:   getEnvInt(envKafkaConsumerBatchRecords, defaultKafkaConsumerBatchRecords),
-		KafkaConsumerBatchBytes:     getEnvInt(envKafkaConsumerBatchBytes, defaultKafkaConsumerBatchBytes),
-		KafkaConsumerFlushInterval:  getEnvDurationMS(envKafkaConsumerFlushInterval, defaultKafkaConsumerFlushIntervalMS),
-		KafkaConsumerReadMaxBytes:   getEnvInt(envKafkaConsumerReadMaxBytes, defaultKafkaConsumerReadMaxBytes),
-		KafkaConsumerMaxAttempts:    getEnvInt(envKafkaConsumerMaxAttempts, defaultKafkaConsumerMaxAttempts),
-		KafkaConsumerRetryInitial:   getEnvDurationMS(envKafkaConsumerRetryInitial, defaultKafkaConsumerRetryInitialMS),
-		KafkaConsumerRetryMax:       getEnvDurationMS(envKafkaConsumerRetryMax, defaultKafkaConsumerRetryMaxMS),
-		AlertEvaluationInterval:     getEnvDurationMS(envAlertEvaluationInterval, defaultAlertEvaluationIntervalMS),
-		RateLimitLimit:              getEnvFloat(envRateLimitLimit, defaultRateLimitLimit),
-		RateLimitBurst:              getEnvInt(envRateLimitBurst, defaultRateLimitBurst),
-		RateLimitWindow:             getEnvDurationMS(envRateLimitWindow, defaultRateLimitWindowMS),
-		TelemetryRetentionDays:      getEnvInt(envTelemetryRetentionDays, defaultTelemetryRetentionDays),
-		NotificationRetentionDays:   getEnvInt(envNotificationRetentionDays, defaultNotificationRetentionDays),
-		RefreshTokenRetentionDays:   getEnvInt(envRefreshTokenRetentionDays, defaultRefreshTokenRetentionDays),
-
-		KafkaAIInvestigationTopic:       getEnv(envKafkaAIInvestigationTopic, defaultKafkaAIInvestigationTopic),
-		KafkaAIRetryTopic:               getEnv(envKafkaAIRetryTopic, defaultKafkaAIRetryTopic),
-		KafkaAIDLQTopic:                 getEnv(envKafkaAIDLQTopic, defaultKafkaAIDLQTopic),
-		AIServiceToken:                  getEnv(envAIServiceToken, defaultAIServiceToken),
-		InvestigationOutboxPollInterval: getEnvDurationMS(envInvestigationOutboxPollIntervalMS, defaultInvestigationOutboxPollIntervalMS),
-		InvestigationOutboxBatchSize:    getEnvInt(envInvestigationOutboxBatchSize, defaultInvestigationOutboxBatchSize),
-	}
-
-	cfg.Server = ServerConfig{
-		AppURL:            cfg.AppUrl,
-		AppEnv:            cfg.AppEnv,
-		AppMode:           cfg.AppMode,
-		LogLevel:          cfg.LogLevel,
-		HTTPPort:          cfg.HTTPPort,
-		HTTPReadTimeout:   cfg.HTTPReadTimeout,
-		HTTPWriteTimeout:  cfg.HTTPWriteTimeout,
-		HTTPIdleTimeout:   cfg.HTTPIdleTimeout,
-		HTTPHeaderTimeout: cfg.HTTPHeaderTimeout,
-		MaxBodyBytes:      cfg.MaxBodyBytes,
-		RateLimitLimit:    cfg.RateLimitLimit,
-		RateLimitBurst:    cfg.RateLimitBurst,
-		RateLimitWindow:   cfg.RateLimitWindow,
-	}
-
-	cfg.Database = DatabaseConfig{
-		PostgresHost:            cfg.PostgresHost,
-		PostgresPort:            cfg.PostgresPort,
-		PostgresUser:            cfg.PostgresUser,
-		PostgresPassword:        cfg.PostgresPassword,
-		PostgresDBName:          cfg.PostgresDBName,
-		PostgresTimeout:         cfg.PostgresTimeout,
-		PostgresMaxConns:        cfg.PostgresMaxConns,
-		PostgresMinConns:        cfg.PostgresMinConns,
-		PostgresMaxConnIdleTime: cfg.PostgresMaxConnIdleTime,
-		PostgresMaxConnLifetime: cfg.PostgresMaxConnLifetime,
-		RedisURL:                cfg.RedisURL,
-		RedisTimeout:            cfg.RedisTimeout,
-	}
-
-	cfg.Kafka = KafkaConfig{
-		Brokers:                      cfg.KafkaBrokers,
-		ClientID:                     cfg.KafkaClientID,
-		ConsumerGroup:                cfg.KafkaConsumerGroup,
-		TracesTopic:                  cfg.KafkaTracesTopic,
-		LogsTopic:                    cfg.KafkaLogsTopic,
-		MetricsTopic:                 cfg.KafkaMetricsTopic,
-		TracesDLQTopic:               cfg.KafkaTracesDLQTopic,
-		LogsDLQTopic:                 cfg.KafkaLogsDLQTopic,
-		MetricsDLQTopic:              cfg.KafkaMetricsDLQTopic,
-		TopicPartitions:              cfg.KafkaTopicPartitions,
-		TopicReplicationFactor:       cfg.KafkaTopicReplicationFactor,
-		TopicRetention:               cfg.KafkaTopicRetention,
-		Compression:                  cfg.KafkaCompression,
-		ProducerBatchSize:            cfg.KafkaProducerBatchSize,
-		ProducerBatchBytes:           cfg.KafkaProducerBatchBytes,
-		ProducerBatchTimeout:         cfg.KafkaProducerBatchTimeout,
-		ProducerWriteTimeout:         cfg.KafkaProducerWriteTimeout,
-		ProducerRequiredAcks:         cfg.KafkaProducerRequiredAcks,
-		ProducerMaxAttempts:          cfg.KafkaProducerMaxAttempts,
-		ConsumerWorkers:              cfg.KafkaConsumerWorkers,
-		ConsumerBatchRecords:         cfg.KafkaConsumerBatchRecords,
-		ConsumerBatchBytes:           cfg.KafkaConsumerBatchBytes,
-		ConsumerFlushInterval:        cfg.KafkaConsumerFlushInterval,
-		ConsumerReadMaxBytes:         cfg.KafkaConsumerReadMaxBytes,
-		ConsumerMaxAttempts:          cfg.KafkaConsumerMaxAttempts,
-		ConsumerRetryInitial:         cfg.KafkaConsumerRetryInitial,
-		ConsumerRetryMax:             cfg.KafkaConsumerRetryMax,
-		AIInvestigationTopic:         cfg.KafkaAIInvestigationTopic,
-		AIRetryTopic:                 cfg.KafkaAIRetryTopic,
-		AIDLQTopic:                   cfg.KafkaAIDLQTopic,
-		InvestigationOutboxPoll:      cfg.InvestigationOutboxPollInterval,
-		InvestigationOutboxBatchSize: cfg.InvestigationOutboxBatchSize,
-	}
-
-	cfg.Auth = AuthConfig{
-		JWTSecret:               cfg.JWTSecret,
-		AccessTokenExpiryMins:   cfg.AccessTokenExpiryMins,
-		RefreshTokenExpiryDays:  cfg.RefreshTokenExpiryDays,
-		InviteExpiryDays:        cfg.InviteExpiryDays,
-		PasswordResetExpiryMins: cfg.PasswordResetExpiryMins,
-		AIServiceToken:          cfg.AIServiceToken,
-	}
-
-	return cfg, nil
+	return []string{c.URL}
 }
 
-// AccessTokenDuration returns the current access token lifespan.
-func (config *Config) AccessTokenDuration() time.Duration {
-	return time.Duration(config.AccessTokenExpiryMins) * time.Minute
-}
-
-// RefreshTokenDuration returns the current refresh token lifespan.
-func (config *Config) RefreshTokenDuration() time.Duration {
-	return time.Duration(config.RefreshTokenExpiryDays) * 24 * time.Hour
-}
-
-// InviteDuration returns the current invite expiration window.
-func (config *Config) InviteDuration() time.Duration {
-	return time.Duration(config.InviteExpiryDays) * 24 * time.Hour
-}
-
-// PasswordResetDuration returns the current password reset expiration window.
-func (config *Config) PasswordResetDuration() time.Duration {
-	return time.Duration(config.PasswordResetExpiryMins) * time.Minute
-}
-
-// GetPostgresDSN returns DSN for golang-migrate.
-func (config *Config) GetPostgresDSN() string {
-	return fmt.Sprintf("pgx5://%s:%s@%s:%s/%s?sslmode=disable",
-		config.PostgresUser,
-		config.PostgresPassword,
-		config.PostgresHost,
-		config.PostgresPort,
-		config.PostgresDBName,
-	)
-}
-
-// GetPoolDSN returns DSN for pgxpool connection.
-func (config *Config) GetPoolDSN() string {
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
-		config.PostgresUser,
-		config.PostgresPassword,
-		config.PostgresHost,
-		config.PostgresPort,
-		config.PostgresDBName,
-	)
-}
-
-// GetPoolConfig returns a database.PoolConfig populated from database settings.
-func (config *Config) GetPoolConfig() database.PoolConfig {
-	return database.PoolConfig{
-		MaxConns:        config.Database.PostgresMaxConns,
-		MinConns:        config.Database.PostgresMinConns,
-		MaxConnIdleTime: config.Database.PostgresMaxConnIdleTime,
-		MaxConnLifetime: config.Database.PostgresMaxConnLifetime,
+// ShouldAutoMigrate reports whether to apply migrations at startup.
+func (c AppConfig) ShouldAutoMigrate() bool {
+	if c.AutoMigrate != nil {
+		return *c.AutoMigrate
 	}
+	return c.IsDevelopment()
 }
 
-// getEnv reads an environment variable by key.
-// Returns the fallback value if the variable is not set.
-func getEnv(key, fallback string) string {
-	if value, exists := os.LookupEnv(key); exists {
-		return value
-	}
-	return fallback
+type HTTPConfig struct {
+	Port          string        `env:"HTTP_PORT" envDefault:"8080"`
+	ReadTimeout   time.Duration `env:"HTTP_READ_TIMEOUT_MS" envDefault:"10000"`
+	WriteTimeout  time.Duration `env:"HTTP_WRITE_TIMEOUT_MS" envDefault:"30000"`
+	IdleTimeout   time.Duration `env:"HTTP_IDLE_TIMEOUT_MS" envDefault:"120000"`
+	HeaderTimeout time.Duration `env:"HTTP_HEADER_TIMEOUT_MS" envDefault:"5000"`
+	MaxBodyBytes  int64         `env:"MAX_BODY_BYTES" envDefault:"10485760"`
+	// RateLimitBurst requests are allowed per RateLimitWindow, per client IP
+	// and per organization.
+	RateLimitBurst  int           `env:"RATE_LIMIT_BURST" envDefault:"200"`
+	RateLimitWindow time.Duration `env:"RATE_LIMIT_WINDOW_MS" envDefault:"1000"`
 }
 
-type validationRule struct {
-	ok  bool
-	err error
+type PostgresConfig struct {
+	Host            string        `env:"POSTGRES_HOST" envDefault:"localhost"`
+	Port            string        `env:"POSTGRES_PORT" envDefault:"5432"`
+	User            string        `env:"POSTGRES_USER" envDefault:"apm_user"`
+	Password        string        `env:"POSTGRES_PASSWORD"`
+	DBName          string        `env:"POSTGRES_DB" envDefault:"apm_db"`
+	Timeout         time.Duration `env:"POSTGRES_TIMEOUT_MS" envDefault:"5000"`
+	MaxConns        int32         `env:"POSTGRES_MAX_CONNS" envDefault:"50"`
+	MinConns        int32         `env:"POSTGRES_MIN_CONNS" envDefault:"5"`
+	MaxConnIdleTime time.Duration `env:"POSTGRES_MAX_CONN_IDLE_TIME_MS" envDefault:"900000"`
+	MaxConnLifetime time.Duration `env:"POSTGRES_MAX_CONN_LIFETIME_MS" envDefault:"3600000"`
 }
 
-func (config *Config) Validate() error {
-	validAcks := map[int]bool{-1: true, 0: true, 1: true}
-	validCompression := map[string]bool{
-		"lz4": true, "gzip": true, "snappy": true, "zstd": true, "none": true,
-	}
+// MigrateDSN is the connection string golang-migrate expects.
+func (c PostgresConfig) MigrateDSN() string { return c.dsn("pgx5") }
 
-	rules := []validationRule{
-		// --- Server settings ---
-		{config.AppEnv != "", fmt.Errorf("APP_ENV must be set")},
-		{config.LogLevel != "", fmt.Errorf("LOG_LEVEL must be set")},
-		{config.HTTPPort != "", fmt.Errorf("HTTP_PORT must be set")},
-		{config.HTTPReadTimeout > 0, fmt.Errorf("HTTP_READ_TIMEOUT_MS must be greater than 0")},
-		{config.HTTPWriteTimeout > 0, fmt.Errorf("HTTP_WRITE_TIMEOUT_MS must be greater than 0")},
-		{config.HTTPIdleTimeout > 0, fmt.Errorf("HTTP_IDLE_TIMEOUT_MS must be greater than 0")},
-		{config.HTTPHeaderTimeout > 0, fmt.Errorf("HTTP_HEADER_TIMEOUT_MS must be greater than 0")},
-		{config.MaxBodyBytes > 0, fmt.Errorf("MAX_BODY_BYTES must be greater than 0")},
+// PoolDSN is the connection string pgxpool expects.
+func (c PostgresConfig) PoolDSN() string { return c.dsn("postgres") }
 
-		// --- Database settings ---
-		{config.PostgresHost != "", fmt.Errorf("POSTGRES_HOST must be set")},
-		{config.RedisURL != "", fmt.Errorf("REDIS_URL must be set")},
-		{config.PostgresPort != "", fmt.Errorf("POSTGRES_PORT must be set")},
-		{config.PostgresUser != "", fmt.Errorf("POSTGRES_USER must be set")},
-		{config.PostgresDBName != "", fmt.Errorf("POSTGRES_DB must be set")},
-		{config.PostgresTimeout > 0, fmt.Errorf("POSTGRES_TIMEOUT_MS must be greater than 0")},
-		{config.PostgresMaxConns > 0, fmt.Errorf("POSTGRES_MAX_CONNS must be greater than 0")},
-		{config.PostgresMinConns >= 0, fmt.Errorf("POSTGRES_MIN_CONNS must be greater than or equal to 0")},
-		{config.PostgresMaxConns >= config.PostgresMinConns, fmt.Errorf("POSTGRES_MAX_CONNS must be greater than or equal to POSTGRES_MIN_CONNS")},
-		{config.PostgresMaxConnIdleTime > 0, fmt.Errorf("POSTGRES_MAX_CONN_IDLE_TIME_MS must be greater than 0")},
-		{config.PostgresMaxConnLifetime > 0, fmt.Errorf("POSTGRES_MAX_CONN_LIFETIME_MS must be greater than 0")},
-		{config.RedisTimeout > 0, fmt.Errorf("REDIS_TIMEOUT_MS must be greater than 0")},
-		{config.PostgresPassword != "", fmt.Errorf("POSTGRES_PASSWORD must be set")},
-
-		// --- Auth settings ---
-		{config.JWTSecret != "", fmt.Errorf("JWT_SECRET must be set")},
-		{len(config.JWTSecret) >= 32, fmt.Errorf("JWT_SECRET must be at least 32 characters, got %d", len(config.JWTSecret))},
-		{config.AccessTokenExpiryMins > 0, fmt.Errorf("ACCESS_TOKEN_EXPIRY_MINS must be greater than 0")},
-		{config.RefreshTokenExpiryDays > 0, fmt.Errorf("REFRESH_TOKEN_EXPIRY_DAYS must be greater than 0")},
-		{config.InviteExpiryDays > 0, fmt.Errorf("INVITE_EXPIRY_DAYS must be greater than 0")},
-		{config.PasswordResetExpiryMins > 0, fmt.Errorf("PASSWORD_RESET_EXPIRY_MINS must be greater than 0")},
-
-		// --- Email settings ---
-		{config.EmailFrom != "", fmt.Errorf("EMAIL_FROM must be set")},
-		{config.SMTPHost != "", fmt.Errorf("SMTP_HOST must be set")},
-		{config.SMTPPort != "", fmt.Errorf("SMTP_PORT must be set")},
-
-		// --- Kafka settings ---
-		{config.KafkaBrokers != "", fmt.Errorf("KAFKA_BROKERS must be set")},
-		{config.KafkaClientID != "", fmt.Errorf("KAFKA_CLIENT_ID must be set")},
-		{config.KafkaConsumerGroup != "", fmt.Errorf("KAFKA_CONSUMER_GROUP must be set")},
-		{config.KafkaTracesTopic != "" && config.KafkaLogsTopic != "" && config.KafkaMetricsTopic != "",
-			fmt.Errorf("KAFKA telemetry topics must be set")},
-		{config.KafkaTracesDLQTopic != "" && config.KafkaLogsDLQTopic != "" && config.KafkaMetricsDLQTopic != "",
-			fmt.Errorf("KAFKA DLQ topics must be set")},
-		{config.KafkaTopicPartitions > 0, fmt.Errorf("KAFKA_TOPIC_PARTITIONS must be greater than 0")},
-		{config.KafkaTopicReplicationFactor > 0, fmt.Errorf("KAFKA_TOPIC_REPLICATION_FACTOR must be greater than 0")},
-		{config.KafkaTopicRetention > 0, fmt.Errorf("KAFKA_TOPIC_RETENTION_MS must be greater than 0")},
-		{config.KafkaProducerBatchSize > 0, fmt.Errorf("KAFKA_PRODUCER_BATCH_SIZE must be greater than 0")},
-		{config.KafkaProducerBatchBytes > 0, fmt.Errorf("KAFKA_PRODUCER_BATCH_BYTES must be greater than 0")},
-		{config.KafkaProducerBatchTimeout > 0, fmt.Errorf("KAFKA_PRODUCER_BATCH_TIMEOUT_MS must be greater than 0")},
-		{config.KafkaProducerWriteTimeout > 0, fmt.Errorf("KAFKA_PRODUCER_WRITE_TIMEOUT_MS must be greater than 0")},
-		{config.KafkaProducerMaxAttempts > 0, fmt.Errorf("KAFKA_PRODUCER_MAX_ATTEMPTS must be greater than 0")},
-		{validAcks[config.KafkaProducerRequiredAcks],
-			fmt.Errorf("KAFKA_PRODUCER_REQUIRED_ACKS must be -1, 0, or 1, got %d", config.KafkaProducerRequiredAcks)},
-		{validCompression[config.KafkaCompression],
-			fmt.Errorf("KAFKA_COMPRESSION must be one of lz4/gzip/snappy/zstd/none, got %q", config.KafkaCompression)},
-		{config.KafkaConsumerWorkers > 0, fmt.Errorf("KAFKA_CONSUMER_WORKERS must be greater than 0")},
-		{config.KafkaConsumerBatchRecords > 0, fmt.Errorf("KAFKA_CONSUMER_BATCH_RECORDS must be greater than 0")},
-		{config.KafkaConsumerBatchBytes > 0, fmt.Errorf("KAFKA_CONSUMER_BATCH_BYTES must be greater than 0")},
-		{config.KafkaConsumerFlushInterval > 0, fmt.Errorf("KAFKA_CONSUMER_FLUSH_INTERVAL_MS must be greater than 0")},
-		{config.KafkaConsumerReadMaxBytes > 0, fmt.Errorf("KAFKA_CONSUMER_READ_MAX_BYTES must be greater than 0")},
-		{config.KafkaConsumerMaxAttempts > 0, fmt.Errorf("KAFKA_CONSUMER_MAX_ATTEMPTS must be greater than 0")},
-		{config.KafkaConsumerRetryInitial > 0, fmt.Errorf("KAFKA_CONSUMER_RETRY_INITIAL_MS must be greater than 0")},
-		{config.KafkaConsumerRetryMax > 0, fmt.Errorf("KAFKA_CONSUMER_RETRY_MAX_MS must be greater than 0")},
-
-		// --- Alerting ---
-		{config.AlertEvaluationInterval > 0, fmt.Errorf("ALERT_EVALUATION_INTERVAL_MS must be greater than 0")},
-
-		// --- Rate Limiting ---
-		{config.RateLimitLimit > 0, fmt.Errorf("RATE_LIMIT_LIMIT must be greater than 0")},
-		{config.RateLimitBurst > 0, fmt.Errorf("RATE_LIMIT_BURST must be greater than 0")},
-
-		// --- AI Investigation ---
-		{config.KafkaAIInvestigationTopic != "", fmt.Errorf("KAFKA_AI_INVESTIGATION_TOPIC must be set")},
-		{config.KafkaAIRetryTopic != "", fmt.Errorf("KAFKA_AI_RETRY_TOPIC must be set")},
-		{config.KafkaAIDLQTopic != "", fmt.Errorf("KAFKA_AI_DLQ_TOPIC must be set")},
-		{config.AIServiceToken != "", fmt.Errorf("AI_SERVICE_TOKEN must be set")},
-		{config.InvestigationOutboxPollInterval > 0, fmt.Errorf("INVESTIGATION_OUTBOX_POLL_INTERVAL_MS must be greater than 0")},
-		{config.InvestigationOutboxBatchSize > 0, fmt.Errorf("INVESTIGATION_OUTBOX_BATCH_SIZE must be greater than 0")},
-	}
-
-	var errs []error
-	for _, r := range rules {
-		if !r.ok {
-			errs = append(errs, r.err)
-		}
-	}
-	return errors.Join(errs...)
+func (c PostgresConfig) dsn(scheme string) string {
+	return fmt.Sprintf("%s://%s:%s@%s:%s/%s?sslmode=disable", scheme, c.User, c.Password, c.Host, c.Port, c.DBName)
 }
 
-func (config *Config) ValidateScheduler() error {
-	rules := []validationRule{
-		// --- Server settings ---
-		{config.AppEnv != "", fmt.Errorf("APP_ENV must be set")},
-		{config.LogLevel != "", fmt.Errorf("LOG_LEVEL must be set")},
-		{config.AppMode == "scheduler" || config.AppMode == "all", fmt.Errorf("APP_MODE must be scheduler or all")},
-
-		// --- Database settings ---
-		{config.PostgresHost != "", fmt.Errorf("POSTGRES_HOST must be set")},
-		{config.RedisURL != "", fmt.Errorf("REDIS_URL must be set")},
-		{config.PostgresPort != "", fmt.Errorf("POSTGRES_PORT must be set")},
-		{config.PostgresUser != "", fmt.Errorf("POSTGRES_USER must be set")},
-		{config.PostgresDBName != "", fmt.Errorf("POSTGRES_DB must be set")},
-		{config.PostgresTimeout > 0, fmt.Errorf("POSTGRES_TIMEOUT_MS must be greater than 0")},
-		{config.PostgresMaxConns > 0, fmt.Errorf("POSTGRES_MAX_CONNS must be greater than 0")},
-		{config.PostgresMinConns >= 0, fmt.Errorf("POSTGRES_MIN_CONNS must be greater than or equal to 0")},
-		{config.PostgresMaxConns >= config.PostgresMinConns, fmt.Errorf("POSTGRES_MAX_CONNS must be greater than or equal to POSTGRES_MIN_CONNS")},
-		{config.PostgresMaxConnIdleTime > 0, fmt.Errorf("POSTGRES_MAX_CONN_IDLE_TIME_MS must be greater than 0")},
-		{config.PostgresMaxConnLifetime > 0, fmt.Errorf("POSTGRES_MAX_CONN_LIFETIME_MS must be greater than 0")},
-		{config.RedisTimeout > 0, fmt.Errorf("REDIS_TIMEOUT_MS must be greater than 0")},
-		{config.PostgresPassword != "", fmt.Errorf("POSTGRES_PASSWORD must be set")},
-
-		// --- Email settings ---
-		{config.EmailFrom != "", fmt.Errorf("EMAIL_FROM must be set")},
-		{config.SMTPHost != "", fmt.Errorf("SMTP_HOST must be set")},
-		{config.SMTPPort != "", fmt.Errorf("SMTP_PORT must be set")},
-
-		// --- Alerting ---
-		{config.AlertEvaluationInterval > 0, fmt.Errorf("ALERT_EVALUATION_INTERVAL_MS must be greater than 0")},
-	}
-
-	var errs []error
-	for _, r := range rules {
-		if !r.ok {
-			errs = append(errs, r.err)
-		}
-	}
-	return errors.Join(errs...)
+type RedisConfig struct {
+	// URL is redis://… or a bare host:port.
+	URL     string        `env:"REDIS_URL" envDefault:"localhost:6379"`
+	Timeout time.Duration `env:"REDIS_TIMEOUT_MS" envDefault:"5000"`
 }
 
-func getEnvInt(key string, fallback int) int {
-	if value, exists := os.LookupEnv(key); exists {
-		if index, err := strconv.Atoi(value); err == nil {
-			return index
-		}
-	}
-	return fallback
+type AuthConfig struct {
+	JWTSecret               string `env:"JWT_SECRET"`
+	AccessTokenExpiryMins   int    `env:"ACCESS_TOKEN_EXPIRY_MINS" envDefault:"15"`
+	RefreshTokenExpiryDays  int    `env:"REFRESH_TOKEN_EXPIRY_DAYS" envDefault:"7"`
+	InviteExpiryDays        int    `env:"INVITE_EXPIRY_DAYS" envDefault:"10"`
+	PasswordResetExpiryMins int    `env:"PASSWORD_RESET_EXPIRY_MINS" envDefault:"30"`
 }
 
-func getEnvDurationMS(key string, fallbackMS int) time.Duration {
-	return time.Duration(getEnvInt(key, fallbackMS)) * time.Millisecond
+func (c AuthConfig) AccessTokenTTL() time.Duration {
+	return time.Duration(c.AccessTokenExpiryMins) * time.Minute
+}
+func (c AuthConfig) RefreshTokenTTL() time.Duration {
+	return time.Duration(c.RefreshTokenExpiryDays) * 24 * time.Hour
+}
+func (c AuthConfig) InviteTTL() time.Duration {
+	return time.Duration(c.InviteExpiryDays) * 24 * time.Hour
+}
+func (c AuthConfig) PasswordResetTTL() time.Duration {
+	return time.Duration(c.PasswordResetExpiryMins) * time.Minute
 }
 
-func getEnvFloat(key string, fallback float64) float64 {
-	if value, exists := os.LookupEnv(key); exists {
-		if val, err := strconv.ParseFloat(value, 64); err == nil {
-			return val
-		}
-	}
-	return fallback
+type SMTPConfig struct {
+	From     string `env:"EMAIL_FROM" envDefault:"no-reply@apm-master.local"`
+	Host     string `env:"SMTP_HOST"`
+	Port     string `env:"SMTP_PORT" envDefault:"587"`
+	Username string `env:"SMTP_USERNAME"`
+	Password string `env:"SMTP_PASSWORD"`
+}
+
+type KafkaConfig struct {
+	Brokers       []string `env:"KAFKA_BROKERS" envDefault:"localhost:9092" envSeparator:","`
+	ClientID      string   `env:"KAFKA_CLIENT_ID" envDefault:"apm-master-ingest"`
+	ConsumerGroup string   `env:"KAFKA_CONSUMER_GROUP" envDefault:"apm-master-ingest-writers"`
+
+	TracesTopic     string `env:"KAFKA_TRACES_TOPIC" envDefault:"apm.telemetry.traces.v1"`
+	LogsTopic       string `env:"KAFKA_LOGS_TOPIC" envDefault:"apm.telemetry.logs.v1"`
+	MetricsTopic    string `env:"KAFKA_METRICS_TOPIC" envDefault:"apm.telemetry.metrics.v1"`
+	TracesDLQTopic  string `env:"KAFKA_TRACES_DLQ_TOPIC" envDefault:"apm.telemetry.traces.dlq.v1"`
+	LogsDLQTopic    string `env:"KAFKA_LOGS_DLQ_TOPIC" envDefault:"apm.telemetry.logs.dlq.v1"`
+	MetricsDLQTopic string `env:"KAFKA_METRICS_DLQ_TOPIC" envDefault:"apm.telemetry.metrics.dlq.v1"`
+
+	TopicPartitions        int           `env:"KAFKA_TOPIC_PARTITIONS" envDefault:"12"`
+	TopicReplicationFactor int           `env:"KAFKA_TOPIC_REPLICATION_FACTOR" envDefault:"1"`
+	TopicRetention         time.Duration `env:"KAFKA_TOPIC_RETENTION_MS" envDefault:"604800000"`
+	Compression            string        `env:"KAFKA_COMPRESSION" envDefault:"lz4"`
+
+	ProducerBatchSize    int           `env:"KAFKA_PRODUCER_BATCH_SIZE" envDefault:"1000"`
+	ProducerBatchBytes   int           `env:"KAFKA_PRODUCER_BATCH_BYTES" envDefault:"1048576"`
+	ProducerBatchTimeout time.Duration `env:"KAFKA_PRODUCER_BATCH_TIMEOUT_MS" envDefault:"10"`
+	ProducerWriteTimeout time.Duration `env:"KAFKA_PRODUCER_WRITE_TIMEOUT_MS" envDefault:"10000"`
+	ProducerRequiredAcks int           `env:"KAFKA_PRODUCER_REQUIRED_ACKS" envDefault:"-1"`
+	ProducerMaxAttempts  int           `env:"KAFKA_PRODUCER_MAX_ATTEMPTS" envDefault:"10"`
+
+	ConsumerWorkers       int           `env:"KAFKA_CONSUMER_WORKERS" envDefault:"3"`
+	ConsumerBatchRecords  int           `env:"KAFKA_CONSUMER_BATCH_RECORDS" envDefault:"1000"`
+	ConsumerBatchBytes    int           `env:"KAFKA_CONSUMER_BATCH_BYTES" envDefault:"4194304"`
+	ConsumerFlushInterval time.Duration `env:"KAFKA_CONSUMER_FLUSH_INTERVAL_MS" envDefault:"1000"`
+	ConsumerReadMaxBytes  int           `env:"KAFKA_CONSUMER_READ_MAX_BYTES" envDefault:"10485760"`
+	ConsumerMaxAttempts   int           `env:"KAFKA_CONSUMER_MAX_ATTEMPTS" envDefault:"5"`
+	ConsumerRetryInitial  time.Duration `env:"KAFKA_CONSUMER_RETRY_INITIAL_MS" envDefault:"250"`
+	ConsumerRetryMax      time.Duration `env:"KAFKA_CONSUMER_RETRY_MAX_MS" envDefault:"5000"`
+}
+
+type AlertingConfig struct {
+	EvaluationInterval time.Duration `env:"ALERT_EVALUATION_INTERVAL_MS" envDefault:"60000"`
+}
+
+// RetentionConfig covers tables outside Timescale's own retention policies.
+type RetentionConfig struct {
+	NotificationDays int `env:"NOTIFICATION_RETENTION_DAYS" envDefault:"90"`
+	RefreshTokenDays int `env:"REFRESH_TOKEN_RETENTION_DAYS" envDefault:"30"`
+}
+
+// AIConfig is the integration with apm-ai-service.
+type AIConfig struct {
+	InvestigationTopic string        `env:"KAFKA_AI_INVESTIGATION_TOPIC" envDefault:"ai.investigation.jobs"`
+	RetryTopic         string        `env:"KAFKA_AI_RETRY_TOPIC" envDefault:"ai.investigation.retry"`
+	DLQTopic           string        `env:"KAFKA_AI_DLQ_TOPIC" envDefault:"ai.investigation.dlq"`
+	ServiceToken       string        `env:"AI_SERVICE_TOKEN" envDefault:"apm-ai-secret-token-change-in-production"`
+	OutboxPollInterval time.Duration `env:"INVESTIGATION_OUTBOX_POLL_INTERVAL_MS" envDefault:"2000"`
+	OutboxBatchSize    int           `env:"INVESTIGATION_OUTBOX_BATCH_SIZE" envDefault:"50"`
 }

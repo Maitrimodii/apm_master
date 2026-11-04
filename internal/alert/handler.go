@@ -1,312 +1,261 @@
 package alert
 
 import (
-	"strconv"
 	"time"
 
-	"github.com/Maitrimodii/apm_master/internal/auth/models"
-	"github.com/Maitrimodii/apm_master/internal/server"
-	"github.com/Maitrimodii/apm_master/internal/server/middleware"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+
+	"github.com/Maitrimodii/apm_master/internal/authz"
+	"github.com/Maitrimodii/apm_master/internal/platform/apperr"
+	"github.com/Maitrimodii/apm_master/internal/platform/httpx"
+	"github.com/Maitrimodii/apm_master/internal/platform/middleware"
 )
 
 type Handler struct {
-	service           *Service
-	permissionChecker middleware.PermissionChecker
-	tokenParser       middleware.TokenParser
+	service     *Service
+	checker     authz.Checker
+	tokenParser middleware.TokenParser
+	rateLimit   gin.HandlerFunc
 }
 
-func NewHandler(service *Service, permissionChecker middleware.PermissionChecker, tokenParser middleware.TokenParser) *Handler {
-	return &Handler{service: service, permissionChecker: permissionChecker, tokenParser: tokenParser}
+func NewHandler(service *Service, checker authz.Checker, tokenParser middleware.TokenParser, rateLimit gin.HandlerFunc) *Handler {
+	return &Handler{service: service, checker: checker, tokenParser: tokenParser, rateLimit: rateLimit}
 }
 
-func (handler *Handler) RegisterRoutes(routerGroup *gin.RouterGroup) {
-	g := routerGroup.Group("/alerts")
-	g.Use(middleware.JWTAuth(handler.tokenParser))
+func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
+	auth := []gin.HandlerFunc{middleware.JWTAuth(h.tokenParser)}
+	if h.rateLimit != nil {
+		auth = append(auth, h.rateLimit)
+	}
+	can := func(a authz.Action) gin.HandlerFunc { return middleware.RequirePermission(h.checker, authz.Alerts, a) }
 
-	g.POST("", middleware.RequirePermission(handler.permissionChecker, "alerts", models.Write), handler.Create)
-	g.GET("", middleware.RequirePermission(handler.permissionChecker, "alerts", models.Read), handler.List)
-	g.GET("/:id", middleware.RequirePermission(handler.permissionChecker, "alerts", models.Read), handler.Get)
-	g.PUT("/:id", middleware.RequirePermission(handler.permissionChecker, "alerts", models.Update), handler.Update)
-	g.DELETE("/:id", middleware.RequirePermission(handler.permissionChecker, "alerts", models.Delete), handler.Delete)
-	g.POST("/:id/share", middleware.RequirePermission(handler.permissionChecker, "alerts", models.Write), handler.Share)
-	g.POST("/:id/acknowledge", middleware.RequirePermission(handler.permissionChecker, "alerts", models.Update), handler.Acknowledge)
+	alerts := rg.Group("/alerts", auth...)
+	alerts.POST("", can(authz.Write), h.Create)
+	alerts.GET("", can(authz.Read), h.List)
+	alerts.GET("/:id", can(authz.Read), h.Get)
+	alerts.PUT("/:id", can(authz.Update), h.Update)
+	alerts.DELETE("/:id", can(authz.Delete), h.Delete)
+	alerts.POST("/:id/share", can(authz.Write), h.Share)
+	alerts.POST("/:id/acknowledge", can(authz.Update), h.Acknowledge)
 
-	group := routerGroup.Group("/alert-instances")
-	group.Use(middleware.JWTAuth(handler.tokenParser))
-	group.GET("", middleware.RequirePermission(handler.permissionChecker, "alerts", models.Read), handler.ListInstances)
-	group.GET("/:id", middleware.RequirePermission(handler.permissionChecker, "alerts", models.Read), handler.GetInstanceDetails)
-	group.POST("/:id/acknowledge", middleware.RequirePermission(handler.permissionChecker, "alerts", models.Update), handler.AcknowledgeInstance)
+	instances := rg.Group("/alert-instances", auth...)
+	instances.GET("", can(authz.Read), h.ListInstances)
+	instances.GET("/:id", can(authz.Read), h.GetInstanceDetails)
+	instances.POST("/:id/acknowledge", can(authz.Update), h.AcknowledgeInstance)
 }
 
-func (handler *Handler) Create(ginContext *gin.Context) {
+func (h *Handler) Create(c *gin.Context) {
+	orgID, userID, apiErr := httpx.OrgAndUser(c)
+	if apiErr != nil {
+		httpx.Handle(c, apiErr)
+		return
+	}
 	var req CreateAlertRequest
-	if err := ginContext.ShouldBindJSON(&req); err != nil {
-		server.Handle(ginContext, server.BadRequest(server.CodeValidation, "invalid request payload"))
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.Handle(c, apperr.BadRequest(apperr.CodeValidation, "invalid request payload"))
 		return
 	}
-
-	orgID, userID, err := authContext(ginContext)
+	resp, err := h.service.Create(c.Request.Context(), orgID, userID, req)
 	if err != nil {
-		server.Handle(ginContext, err)
+		httpx.Handle(c, err)
 		return
 	}
-
-	resp, err := handler.service.Create(ginContext.Request.Context(), orgID, userID, req)
-	if err != nil {
-		server.Handle(ginContext, err)
-		return
-	}
-
-	server.Created(ginContext, resp)
+	httpx.Created(c, resp)
 }
 
-func (handler *Handler) List(ginContext *gin.Context) {
-	orgID, _, err := authContext(ginContext)
-	if err != nil {
-		server.Handle(ginContext, err)
+func (h *Handler) List(c *gin.Context) {
+	orgID, apiErr := httpx.OrgID(c)
+	if apiErr != nil {
+		httpx.Handle(c, apiErr)
 		return
 	}
-
-	page, limit := pagination(ginContext)
-	resp, total, err := handler.service.List(ginContext.Request.Context(), orgID, page, limit)
-	if err != nil {
-		server.Handle(ginContext, err)
+	page, apiErr := httpx.ParsePage(c, defaultPageSize)
+	if apiErr != nil {
+		httpx.Handle(c, apiErr)
 		return
 	}
-
-	server.List(ginContext, resp, total, page, limit)
+	resp, total, err := h.service.List(c.Request.Context(), orgID, page.Size, page.Offset())
+	if err != nil {
+		httpx.Handle(c, err)
+		return
+	}
+	httpx.List(c, resp, total, page.Number, page.Size)
 }
 
-func (handler *Handler) Get(ginContext *gin.Context) {
-	orgID, _, alertID, err := routeContext(ginContext)
-	if err != nil {
-		server.Handle(ginContext, err)
+func (h *Handler) Get(c *gin.Context) {
+	orgID, alertID, apiErr := orgAndPathID(c)
+	if apiErr != nil {
+		httpx.Handle(c, apiErr)
 		return
 	}
-
-	resp, err := handler.service.Get(ginContext.Request.Context(), orgID, alertID)
+	resp, err := h.service.Get(c.Request.Context(), orgID, alertID)
 	if err != nil {
-		server.Handle(ginContext, err)
+		httpx.Handle(c, err)
 		return
 	}
-
-	server.OK(ginContext, resp)
+	httpx.OK(c, resp)
 }
 
-func (handler *Handler) Update(ginContext *gin.Context) {
+func (h *Handler) Update(c *gin.Context) {
+	orgID, alertID, apiErr := orgAndPathID(c)
+	if apiErr != nil {
+		httpx.Handle(c, apiErr)
+		return
+	}
 	var req UpdateAlertRequest
-	if err := ginContext.ShouldBindJSON(&req); err != nil {
-		server.Handle(ginContext, server.BadRequest(server.CodeValidation, "invalid request payload"))
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.Handle(c, apperr.BadRequest(apperr.CodeValidation, "invalid request payload"))
 		return
 	}
-
-	orgID, _, alertID, err := routeContext(ginContext)
+	resp, err := h.service.Update(c.Request.Context(), orgID, alertID, req)
 	if err != nil {
-		server.Handle(ginContext, err)
+		httpx.Handle(c, err)
 		return
 	}
-
-	resp, err := handler.service.Update(ginContext.Request.Context(), orgID, alertID, req)
-	if err != nil {
-		server.Handle(ginContext, err)
-		return
-	}
-
-	server.OK(ginContext, resp)
+	httpx.OK(c, resp)
 }
 
-func (handler *Handler) Delete(ginContext *gin.Context) {
-	orgID, _, alertID, err := routeContext(ginContext)
-	if err != nil {
-		server.Handle(ginContext, err)
+func (h *Handler) Delete(c *gin.Context) {
+	orgID, alertID, apiErr := orgAndPathID(c)
+	if apiErr != nil {
+		httpx.Handle(c, apiErr)
 		return
 	}
-
-	if err := handler.service.Delete(ginContext.Request.Context(), orgID, alertID); err != nil {
-		server.Handle(ginContext, err)
+	if err := h.service.Delete(c.Request.Context(), orgID, alertID); err != nil {
+		httpx.Handle(c, err)
 		return
 	}
-
-	server.NoContent(ginContext)
+	httpx.NoContent(c)
 }
 
-func (handler *Handler) Share(ginContext *gin.Context) {
+func (h *Handler) Share(c *gin.Context) {
+	orgID, userID, apiErr := httpx.OrgAndUser(c)
+	if apiErr != nil {
+		httpx.Handle(c, apiErr)
+		return
+	}
+	alertID, apiErr := httpx.PathUUID(c, "id")
+	if apiErr != nil {
+		httpx.Handle(c, apiErr)
+		return
+	}
 	var req ShareAlertRequest
-	if err := ginContext.ShouldBindJSON(&req); err != nil {
-		server.Handle(ginContext, server.BadRequest(server.CodeValidation, "invalid request payload"))
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.Handle(c, apperr.BadRequest(apperr.CodeValidation, "invalid request payload"))
 		return
 	}
-
-	orgID, userID, alertID, err := routeContext(ginContext)
+	resp, err := h.service.Share(c.Request.Context(), orgID, userID, alertID, req)
 	if err != nil {
-		server.Handle(ginContext, err)
+		httpx.Handle(c, err)
 		return
 	}
-
-	resp, err := handler.service.Share(ginContext.Request.Context(), orgID, userID, alertID, req)
-	if err != nil {
-		server.Handle(ginContext, err)
-		return
-	}
-
-	server.OK(ginContext, resp)
+	httpx.OK(c, resp)
 }
 
-func (handler *Handler) Acknowledge(ginContext *gin.Context) {
-	orgID, _, alertID, err := routeContext(ginContext)
-	if err != nil {
-		server.Handle(ginContext, err)
+func (h *Handler) Acknowledge(c *gin.Context) {
+	orgID, alertID, apiErr := orgAndPathID(c)
+	if apiErr != nil {
+		httpx.Handle(c, apiErr)
 		return
 	}
-
-	resp, err := handler.service.Acknowledge(ginContext.Request.Context(), orgID, alertID)
+	resp, err := h.service.Acknowledge(c.Request.Context(), orgID, alertID)
 	if err != nil {
-		server.Handle(ginContext, err)
+		httpx.Handle(c, err)
 		return
 	}
-
-	server.OK(ginContext, resp)
+	httpx.OK(c, resp)
 }
 
-func routeContext(ginContext *gin.Context) (uuid.UUID, uuid.UUID, uuid.UUID, error) {
-	orgID, userID, err := authContext(ginContext)
-	if err != nil {
-		return uuid.UUID{}, uuid.UUID{}, uuid.UUID{}, err
-	}
-
-	alertID, err := uuid.Parse(ginContext.Param("id"))
-	if err != nil {
-		return uuid.UUID{}, uuid.UUID{}, uuid.UUID{}, server.BadRequest(server.CodeValidation, "invalid alert id")
-	}
-
-	return orgID, userID, alertID, nil
-}
-
-func authContext(ginContext *gin.Context) (uuid.UUID, uuid.UUID, error) {
-	orgID, err := uuid.Parse(ginContext.GetString("org_id"))
-	if err != nil {
-		return uuid.UUID{}, uuid.UUID{}, server.Unauthorized(server.CodeInvalidToken, "invalid token")
-	}
-
-	userID, err := uuid.Parse(ginContext.GetString("user_id"))
-	if err != nil {
-		return uuid.UUID{}, uuid.UUID{}, server.Unauthorized(server.CodeInvalidToken, "invalid token")
-	}
-
-	return orgID, userID, nil
-}
-
-func pagination(ginContext *gin.Context) (int, int) {
-	page, _ := strconv.Atoi(ginContext.DefaultQuery("page", "1"))
-	limit, _ := strconv.Atoi(ginContext.DefaultQuery("limit", "20"))
-	if page < 1 {
-		page = 1
-	}
-	if limit < 1 || limit > 100 {
-		limit = 20
-	}
-	return page, limit
-}
-
-func (handler *Handler) ListInstances(ginContext *gin.Context) {
-	orgID, _, err := authContext(ginContext)
-	if err != nil {
-		server.Handle(ginContext, err)
+func (h *Handler) ListInstances(c *gin.Context) {
+	orgID, apiErr := httpx.OrgID(c)
+	if apiErr != nil {
+		httpx.Handle(c, apiErr)
 		return
 	}
+	filter, page, apiErr := parseInstanceFilter(c)
+	if apiErr != nil {
+		httpx.Handle(c, apiErr)
+		return
+	}
+	filter.OrgID = orgID
+	resp, total, err := h.service.ListInstances(c.Request.Context(), filter)
+	if err != nil {
+		httpx.Handle(c, err)
+		return
+	}
+	httpx.List(c, resp, total, page.Number, page.Size)
+}
 
-	state := ginContext.Query("state")
-	severity := ginContext.Query("severity")
+func (h *Handler) GetInstanceDetails(c *gin.Context) {
+	orgID, instanceID, apiErr := orgAndPathID(c)
+	if apiErr != nil {
+		httpx.Handle(c, apiErr)
+		return
+	}
+	resp, err := h.service.GetInstanceDetails(c.Request.Context(), orgID, instanceID)
+	if err != nil {
+		httpx.Handle(c, err)
+		return
+	}
+	httpx.OK(c, resp)
+}
 
-	var alertID uuid.UUID
-	if alertIDStr := ginContext.Query("alert_id"); alertIDStr != "" {
-		alertID, err = uuid.Parse(alertIDStr)
+func (h *Handler) AcknowledgeInstance(c *gin.Context) {
+	orgID, instanceID, apiErr := orgAndPathID(c)
+	if apiErr != nil {
+		httpx.Handle(c, apiErr)
+		return
+	}
+	resp, err := h.service.AcknowledgeInstance(c.Request.Context(), orgID, instanceID)
+	if err != nil {
+		httpx.Handle(c, err)
+		return
+	}
+	httpx.OK(c, resp)
+}
+
+func orgAndPathID(c *gin.Context) (uuid.UUID, uuid.UUID, *apperr.Error) {
+	orgID, apiErr := httpx.OrgID(c)
+	if apiErr != nil {
+		return uuid.Nil, uuid.Nil, apiErr
+	}
+	id, apiErr := httpx.PathUUID(c, "id")
+	return orgID, id, apiErr
+}
+
+func parseInstanceFilter(c *gin.Context) (InstanceFilter, httpx.Page, *apperr.Error) {
+	page, apiErr := httpx.ParsePage(c, defaultPageSize)
+	if apiErr != nil {
+		return InstanceFilter{}, httpx.Page{}, apiErr
+	}
+	f := InstanceFilter{
+		State:  AlertState(c.Query("state")),
+		Limit:  page.Size,
+		Offset: page.Offset(),
+	}
+	if v := c.Query("severity"); v != "" {
+		sev, ok := ParseSeverity(v)
+		if !ok {
+			return InstanceFilter{}, httpx.Page{}, apperr.ValidationError("severity", "must be one of low, medium, high, critical")
+		}
+		f.Severity = sev
+	}
+	if v := c.Query("alert_id"); v != "" {
+		id, err := uuid.Parse(v)
 		if err != nil {
-			server.Handle(ginContext, server.BadRequest(server.CodeValidation, "invalid alert_id format"))
-			return
+			return InstanceFilter{}, httpx.Page{}, apperr.ValidationError("alert_id", "must be a UUID")
+		}
+		f.AlertID = id
+	}
+	for name, dst := range map[string]**time.Time{"from": &f.From, "to": &f.To} {
+		if v := c.Query(name); v != "" {
+			t, err := time.Parse(time.RFC3339, v)
+			if err != nil {
+				return InstanceFilter{}, httpx.Page{}, apperr.ValidationError(name, "must be an RFC3339 timestamp")
+			}
+			*dst = &t
 		}
 	}
-
-	var fromTime *time.Time
-	if fromStr := ginContext.Query("from"); fromStr != "" {
-		parsedTime, err := time.Parse(time.RFC3339, fromStr)
-		if err != nil {
-			server.Handle(ginContext, server.BadRequest(server.CodeValidation, "invalid from time format, must be RFC3339"))
-			return
-		}
-		fromTime = &parsedTime
-	}
-
-	var toTime *time.Time
-	if toStr := ginContext.Query("to"); toStr != "" {
-		parsedTime, err := time.Parse(time.RFC3339, toStr)
-		if err != nil {
-			server.Handle(ginContext, server.BadRequest(server.CodeValidation, "invalid to time format, must be RFC3339"))
-			return
-		}
-		toTime = &parsedTime
-	}
-
-	page, _ := strconv.Atoi(ginContext.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(ginContext.DefaultQuery("page_size", "20"))
-	if page < 1 {
-		page = 1
-	}
-	if pageSize < 1 || pageSize > 100 {
-		pageSize = 20
-	}
-
-	resp, total, err := handler.service.ListInstances(ginContext.Request.Context(), orgID, state, severity, alertID, fromTime, toTime, page, pageSize)
-	if err != nil {
-		server.Handle(ginContext, err)
-		return
-	}
-
-	server.List(ginContext, resp, total, page, pageSize)
-}
-
-func (handler *Handler) GetInstanceDetails(ginContext *gin.Context) {
-	orgID, _, err := authContext(ginContext)
-	if err != nil {
-		server.Handle(ginContext, err)
-		return
-	}
-
-	instanceID, err := uuid.Parse(ginContext.Param("id"))
-	if err != nil {
-		server.Handle(ginContext, server.BadRequest(server.CodeValidation, "invalid alert instance id"))
-		return
-	}
-
-	resp, err := handler.service.GetInstanceDetails(ginContext.Request.Context(), orgID, instanceID)
-	if err != nil {
-		server.Handle(ginContext, err)
-		return
-	}
-
-	server.OK(ginContext, resp)
-}
-
-func (handler *Handler) AcknowledgeInstance(ginContext *gin.Context) {
-	orgID, _, err := authContext(ginContext)
-	if err != nil {
-		server.Handle(ginContext, err)
-		return
-	}
-
-	instanceID, err := uuid.Parse(ginContext.Param("id"))
-	if err != nil {
-		server.Handle(ginContext, server.BadRequest(server.CodeValidation, "invalid alert instance id"))
-		return
-	}
-
-	resp, err := handler.service.AcknowledgeInstance(ginContext.Request.Context(), orgID, instanceID)
-	if err != nil {
-		server.Handle(ginContext, err)
-		return
-	}
-
-	server.OK(ginContext, resp)
+	return f, page, nil
 }

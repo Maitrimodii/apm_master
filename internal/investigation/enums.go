@@ -22,6 +22,15 @@ var TerminalStatuses = map[InvestigationStatus]bool{
 	StatusTimedOut:     true,
 }
 
+// terminalStatusList returns the terminal statuses as strings for SQL.
+func terminalStatusList() []string {
+	out := make([]string, 0, len(TerminalStatuses))
+	for st := range TerminalStatuses {
+		out = append(out, string(st))
+	}
+	return out
+}
+
 // ValidTransitions maps allowed state transitions.
 var ValidTransitions = map[InvestigationStatus]map[InvestigationStatus]bool{
 	StatusQueued: {

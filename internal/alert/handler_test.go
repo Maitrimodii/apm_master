@@ -12,7 +12,7 @@ func TestRegisterRoutesIncludesAlertInstances(testRunner *testing.T) {
 
 	router := gin.New()
 	api := router.Group("/api/v1")
-	NewHandler(nil, nil, nil).RegisterRoutes(api)
+	NewHandler(nil, nil, nil, nil).RegisterRoutes(api)
 
 	expectedRoutes := map[string]string{
 		"GET":  "/api/v1/alert-instances",

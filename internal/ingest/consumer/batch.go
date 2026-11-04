@@ -17,29 +17,29 @@ func newMessageBatch(maxLen, maxBytes int) *messageBatch {
 	}
 }
 
-func (batch *messageBatch) add(msg kafkago.Message) {
-	batch.messages = append(batch.messages, msg)
-	batch.bytes += len(msg.Key) + len(msg.Value)
+func (b *messageBatch) add(msg kafkago.Message) {
+	b.messages = append(b.messages, msg)
+	b.bytes += len(msg.Key) + len(msg.Value)
 	for _, header := range msg.Headers {
-		batch.bytes += len(header.Key) + len(header.Value)
+		b.bytes += len(header.Key) + len(header.Value)
 	}
 }
 
-func (batch *messageBatch) full() bool {
-	return len(batch.messages) >= batch.maxLen || batch.bytes >= batch.maxBytes
+func (b *messageBatch) full() bool {
+	return len(b.messages) >= b.maxLen || b.bytes >= b.maxBytes
 }
 
-func (batch *messageBatch) len() int {
-	return len(batch.messages)
+func (b *messageBatch) len() int {
+	return len(b.messages)
 }
 
-func (batch *messageBatch) reset() []kafkago.Message {
-	messages := batch.messages
-	batch.messages = make([]kafkago.Message, 0, batch.maxLen)
-	batch.bytes = 0
+func (b *messageBatch) reset() []kafkago.Message {
+	messages := b.messages
+	b.messages = make([]kafkago.Message, 0, b.maxLen)
+	b.bytes = 0
 	return messages
 }
 
-func (batch *messageBatch) getMessages() []kafkago.Message {
-	return batch.messages
+func (b *messageBatch) getMessages() []kafkago.Message {
+	return b.messages
 }

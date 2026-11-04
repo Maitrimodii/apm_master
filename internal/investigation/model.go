@@ -4,6 +4,8 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Maitrimodii/apm_master/internal/alert"
+
 	"github.com/google/uuid"
 )
 
@@ -15,6 +17,9 @@ var (
 	ErrIncidentNotFound      = errors.New("incident not found or access denied")
 	ErrCannotCancelTerminal  = errors.New("cannot cancel terminal investigation")
 	ErrCannotRetryActive     = errors.New("can only retry investigations in a terminal state")
+	ErrReportNotReady        = errors.New("report not yet available")
+	ErrEvidenceNotFound      = errors.New("evidence not found")
+	ErrTenantMismatch        = errors.New("investigation belongs to another tenant")
 )
 
 type Investigation struct {
@@ -59,7 +64,7 @@ type InvestigationJobEvent struct {
 
 type InvestigationEvidence struct {
 	ID                  uuid.UUID      `json:"id"`
-	InvestigationID      uuid.UUID      `json:"investigation_id"`
+	InvestigationID     uuid.UUID      `json:"investigation_id"`
 	EvidenceType        string         `json:"evidence_type"`
 	SourceService       string         `json:"source_service"`
 	QueryParameters     map[string]any `json:"query_parameters"`
@@ -90,16 +95,19 @@ type InvestigationEvent struct {
 }
 
 type IncidentContext struct {
-	IncidentID  uuid.UUID  `json:"incident_id"`
-	AlertID     uuid.UUID  `json:"alert_id"`
-	OrgID       uuid.UUID  `json:"org_id"`
-	AlertName   string     `json:"alert_name"`
-	Severity    string     `json:"severity"`
-	Condition   string     `json:"condition"`
-	ServiceName *string    `json:"service_name,omitempty"`
-	TriggeredAt time.Time  `json:"triggered_at"`
-	ResolvedAt  *time.Time `json:"resolved_at,omitempty"`
-	Value       float64    `json:"value"`
-	Threshold   float64    `json:"threshold"`
-	Message     string     `json:"message"`
+	IncidentID  uuid.UUID `json:"incident_id"`
+	AlertID     uuid.UUID `json:"alert_id"`
+	OrgID       uuid.UUID `json:"org_id"`
+	AlertName   string    `json:"alert_name"`
+	Severity    string    `json:"severity"`
+	Condition   string    `json:"condition"`
+	ServiceName *string   `json:"service_name,omitempty"`
+	// ParsedCondition is the alert condition already parsed, so the AI service
+	// never has to interpret the condition text itself.
+	ParsedCondition *alert.Expression `json:"parsed_condition,omitempty"`
+	TriggeredAt     time.Time         `json:"triggered_at"`
+	ResolvedAt      *time.Time        `json:"resolved_at,omitempty"`
+	Value           float64           `json:"value"`
+	Threshold       float64           `json:"threshold"`
+	Message         string            `json:"message"`
 }

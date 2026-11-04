@@ -5,8 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Maitrimodii/apm_master/internal/metric"
 	"github.com/google/uuid"
+
+	"github.com/Maitrimodii/apm_master/internal/metrics"
 )
 
 func TestMapRequestMapsValidSpansAndRejectsInvalidSpans(testRunner *testing.T) {
@@ -154,8 +155,8 @@ func TestMapMetricsRequestMapsGaugeHistogramAndRejectsEmptyMetric(testRunner *te
 	}
 
 	gaugeDouble := batch.Metrics[0]
-	if gaugeDouble.MetricType != metric.MetricTypeGauge {
-		testRunner.Fatalf("MetricType = %q, want %q", gaugeDouble.MetricType, metric.MetricTypeGauge)
+	if gaugeDouble.MetricType != metrics.MetricTypeGauge {
+		testRunner.Fatalf("MetricType = %q, want %q", gaugeDouble.MetricType, metrics.MetricTypeGauge)
 	}
 	if gaugeDouble.Value != 42.5 {
 		testRunner.Fatalf("Value = %v, want 42.5", gaugeDouble.Value)
@@ -165,8 +166,8 @@ func TestMapMetricsRequestMapsGaugeHistogramAndRejectsEmptyMetric(testRunner *te
 	}
 
 	gaugeInt := batch.Metrics[1]
-	if gaugeInt.MetricType != metric.MetricTypeGauge {
-		testRunner.Fatalf("MetricType = %q, want %q", gaugeInt.MetricType, metric.MetricTypeGauge)
+	if gaugeInt.MetricType != metrics.MetricTypeGauge {
+		testRunner.Fatalf("MetricType = %q, want %q", gaugeInt.MetricType, metrics.MetricTypeGauge)
 	}
 	if gaugeInt.Value != 100.0 {
 		testRunner.Fatalf("Value = %v, want 100.0", gaugeInt.Value)

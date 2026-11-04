@@ -7,9 +7,10 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/Maitrimodii/apm_master/internal/log"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Maitrimodii/apm_master/internal/logs"
 )
 
 type LogWriter struct {
@@ -20,7 +21,7 @@ func NewLogWriter(pool *pgxpool.Pool) *LogWriter {
 	return &LogWriter{pool: pool}
 }
 
-func (writer *LogWriter) BulkInsert(ctx context.Context, records []log.LogRecord) error {
+func (w *LogWriter) BulkInsert(ctx context.Context, records []logs.LogRecord) error {
 	if len(records) == 0 {
 		return nil
 	}
@@ -58,7 +59,7 @@ func (writer *LogWriter) BulkInsert(ctx context.Context, records []log.LogRecord
 	}
 
 	start := time.Now()
-	_, err := writer.pool.CopyFrom(ctx, pgx.Identifier{"logs"}, cols, pgx.CopyFromRows(rows))
+	_, err := w.pool.CopyFrom(ctx, pgx.Identifier{"logs"}, cols, pgx.CopyFromRows(rows))
 
 	if err != nil {
 		return fmt.Errorf("bulk insert logs: %w", err)

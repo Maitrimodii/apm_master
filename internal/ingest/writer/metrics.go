@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/Maitrimodii/apm_master/internal/metric"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Maitrimodii/apm_master/internal/metrics"
 )
 
 type MetricWriter struct {
@@ -22,9 +23,9 @@ func NewMetricWriter(pool *pgxpool.Pool) *MetricWriter {
 // BulkInsert writes metrics and histogram buckets atomically.
 // Both tables are written in the same transaction — a histogram metric
 // with no buckets, or buckets with no parent metric row, is corrupt data.
-func (writer *MetricWriter) BulkInsert(
+func (w *MetricWriter) BulkInsert(
 	ctx context.Context,
-	batch []metric.WriteBatch,
+	batch []metrics.WriteBatch,
 ) error {
 	if len(batch) == 0 {
 		return nil
@@ -38,15 +39,15 @@ func (writer *MetricWriter) BulkInsert(
 		totalBuckets += len(writeBatch.Buckets)
 	}
 
-	metricBatch := make([]metric.Metric, 0, totalMetrics)
-	bucketBatch := make([]metric.HistogramBucket, 0, totalBuckets)
+	metricBatch := make([]metrics.Metric, 0, totalMetrics)
+	bucketBatch := make([]metrics.HistogramBucket, 0, totalBuckets)
 
 	for _, writeBatch := range batch {
 		metricBatch = append(metricBatch, writeBatch.Metrics...)
 		bucketBatch = append(bucketBatch, writeBatch.Buckets...)
 	}
 
-	return writer.BulkInsertWithBuckets(
+	return w.BulkInsertWithBuckets(
 		ctx,
 		metricBatch,
 		bucketBatch,
@@ -55,28 +56,28 @@ func (writer *MetricWriter) BulkInsert(
 
 // BulkInsertWithBuckets writes metrics and their histogram buckets atomically.
 // Called by the pipeline when the batch contains histogram metric.
-func (writer *MetricWriter) BulkInsertWithBuckets(ctx context.Context, batch []metric.Metric, buckets []metric.HistogramBucket) error {
+func (w *MetricWriter) BulkInsertWithBuckets(ctx context.Context, batch []metrics.Metric, buckets []metrics.HistogramBucket) error {
 	if len(batch) == 0 {
 		return nil
 	}
 
-	transaction, err := writer.pool.Begin(ctx)
+	transaction, err := w.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
-	defer transaction.Rollback(ctx)
+	defer func() { _ = transaction.Rollback(ctx) }()
 
-	if err := writer.insertMetrics(ctx, transaction, batch); err != nil {
+	if err := w.insertMetrics(ctx, transaction, batch); err != nil {
 		return err
 	}
 
 	if len(buckets) > 0 {
-		if err := writer.insertBuckets(ctx, transaction, buckets); err != nil {
+		if err := w.insertBuckets(ctx, transaction, buckets); err != nil {
 			return err
 		}
 	}
 
-	if err := writer.upsertMetadata(ctx, transaction, batch, buckets); err != nil {
+	if err := w.upsertMetadata(ctx, transaction, batch, buckets); err != nil {
 		return err
 	}
 
@@ -87,7 +88,7 @@ func (writer *MetricWriter) BulkInsertWithBuckets(ctx context.Context, batch []m
 	return nil
 }
 
-func (writer *MetricWriter) upsertMetadata(ctx context.Context, transaction pgx.Tx, batch []metric.Metric, buckets []metric.HistogramBucket) error {
+func (w *MetricWriter) upsertMetadata(ctx context.Context, transaction pgx.Tx, batch []metrics.Metric, buckets []metrics.HistogramBucket) error {
 	type metaKey struct {
 		orgID uuid.UUID
 		name  string
@@ -143,7 +144,7 @@ func (writer *MetricWriter) upsertMetadata(ctx context.Context, transaction pgx.
 	return nil
 }
 
-func (writer *MetricWriter) insertMetrics(ctx context.Context, transaction pgx.Tx, batch []metric.Metric) error {
+func (w *MetricWriter) insertMetrics(ctx context.Context, transaction pgx.Tx, batch []metrics.Metric) error {
 	rows := make([][]any, 0, len(batch))
 
 	for _, metricItem := range batch {
@@ -177,7 +178,7 @@ func (writer *MetricWriter) insertMetrics(ctx context.Context, transaction pgx.T
 	return nil
 }
 
-func (writer *MetricWriter) insertBuckets(ctx context.Context, transaction pgx.Tx, buckets []metric.HistogramBucket) error {
+func (w *MetricWriter) insertBuckets(ctx context.Context, transaction pgx.Tx, buckets []metrics.HistogramBucket) error {
 	rows := make([][]any, 0, len(buckets))
 
 	for _, bucketItem := range buckets {

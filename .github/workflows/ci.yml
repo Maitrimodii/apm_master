@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg16
+        env:
+          POSTGRES_USER: apm
+          POSTGRES_PASSWORD: apm
+          POSTGRES_DB: apm_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U apm -d apm_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - name: vet
+        run: go vet ./...
+      - name: unit and DB tests
+        env:
+          APM_INTEGRATION_DSN: pgx5://apm:apm@localhost:5432/apm_test?sslmode=disable
+        run: go test -race -count=1 -p 1 ./...
+      - name: build
+        run: go build ./cmd/...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.1.6

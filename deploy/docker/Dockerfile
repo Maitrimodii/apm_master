@@ -3,7 +3,7 @@
 # ------------------------------------------------------------------------------
 # 1. Base Stage: Go toolchain & dependencies
 # ------------------------------------------------------------------------------
-FROM golang:1.24-alpine AS base
+FROM golang:1.25-alpine AS base
 
 WORKDIR /app
 

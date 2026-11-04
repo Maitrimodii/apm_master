@@ -9,9 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Maitrimodii/apm_master/internal/database"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Maitrimodii/apm_master/internal/platform/pg"
 )
 
 const integrationDSNEnv = "APM_INTEGRATION_DSN"
@@ -28,7 +29,7 @@ func testPool(testRunner *testing.T) *pgxpool.Pool {
 	defer cancel()
 
 	// Apply migrations
-	if err := database.Migrate(dsn, "../../migrations"); err != nil {
+	if err := pg.Migrate(dsn, "../../migrations"); err != nil {
 		testRunner.Fatalf("db.Migrate() error = %v", err)
 	}
 
@@ -57,22 +58,22 @@ type mockProvider struct {
 	mu     sync.Mutex
 	msgs   []Message
 	err    error
-	name   string
+	name   Channel
 	sendCB func(msg Message) error
 }
 
-func (mapItem *mockProvider) Name() string {
-	return mapItem.name
+func (p *mockProvider) Channel() Channel {
+	return p.name
 }
 
-func (mapItem *mockProvider) Send(ctx context.Context, msg Message) error {
-	mapItem.mu.Lock()
-	defer mapItem.mu.Unlock()
-	mapItem.msgs = append(mapItem.msgs, msg)
-	if mapItem.sendCB != nil {
-		return mapItem.sendCB(msg)
+func (p *mockProvider) Send(ctx context.Context, msg Message) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.msgs = append(p.msgs, msg)
+	if p.sendCB != nil {
+		return p.sendCB(msg)
 	}
-	return mapItem.err
+	return p.err
 }
 
 func TestDurableQueueJobProcessing(testRunner *testing.T) {
@@ -96,9 +97,9 @@ func TestDurableQueueJobProcessing(testRunner *testing.T) {
 
 	store := NewStore(pool)
 	mProvider := &mockProvider{name: "email"}
-	worker := NewNotificationWorker(store, []NotificationProvider{mProvider}, nil, 2)
+	worker := NewWorker(store, []Provider{mProvider}, nil, 2)
 
-	task := NotificationTask{
+	task := Task{
 		OrgID:     orgID,
 		UserID:    &userID,
 		EventType: "test_event",
@@ -181,9 +182,9 @@ func TestDurableQueueRetriesAndDeadLetter(testRunner *testing.T) {
 
 	store := NewStore(pool)
 	mProvider := &mockProvider{name: "email", err: errors.New("network outage")}
-	worker := NewNotificationWorker(store, []NotificationProvider{mProvider}, nil, 1)
+	worker := NewWorker(store, []Provider{mProvider}, nil, 1)
 
-	task := NotificationTask{
+	task := Task{
 		OrgID:     orgID,
 		UserID:    &userID,
 		EventType: "retry_event",
@@ -275,9 +276,10 @@ func TestDurableQueueIdempotence(testRunner *testing.T) {
 		testRunner.Fatalf("failed to insert user: %v", err)
 	}
 
-	service := NewService(pool, nil, nil)
+	store := NewStore(pool)
+	service := NewService(store, NewWorker(store, nil, nil, 1), nil)
 	refID := "unique-alert-ref-" + uuid.NewString()
-	task := NotificationTask{
+	task := Task{
 		OrgID:       orgID,
 		UserID:      &userID,
 		EventType:   "idemp_event",
@@ -347,9 +349,9 @@ func TestDurableQueueGracefulShutdown(testRunner *testing.T) {
 			return nil
 		},
 	}
-	worker := NewNotificationWorker(store, []NotificationProvider{mProvider}, nil, 1)
+	worker := NewWorker(store, []Provider{mProvider}, nil, 1)
 
-	task := NotificationTask{
+	task := Task{
 		OrgID:     orgID,
 		UserID:    &userID,
 		EventType: "shutdown_event",
@@ -418,10 +420,10 @@ func TestDurableQueuePriorityProcessing(testRunner *testing.T) {
 
 	store := NewStore(pool)
 	mProvider := &mockProvider{name: "email"}
-	worker := NewNotificationWorker(store, []NotificationProvider{mProvider}, nil, 1)
+	worker := NewWorker(store, []Provider{mProvider}, nil, 1)
 
 	// Create Normal Priority Job (Job 1)
-	task1 := NotificationTask{
+	task1 := Task{
 		OrgID:     orgID,
 		UserID:    &userID,
 		EventType: "normal_event",
@@ -433,7 +435,7 @@ func TestDurableQueuePriorityProcessing(testRunner *testing.T) {
 	}
 
 	// Create High Priority Job (Job 2)
-	task2 := NotificationTask{
+	task2 := Task{
 		OrgID:     orgID,
 		UserID:    &userID,
 		EventType: "high_event",

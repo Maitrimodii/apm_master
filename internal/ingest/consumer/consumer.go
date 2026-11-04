@@ -9,27 +9,29 @@ import (
 	"sync"
 	"time"
 
-	ingestkafka "github.com/Maitrimodii/apm_master/internal/ingest/kafka"
-	"github.com/Maitrimodii/apm_master/internal/ingest/model"
-	"github.com/Maitrimodii/apm_master/internal/ingest/retry"
-	"github.com/Maitrimodii/apm_master/internal/ingest/serializer"
-	"github.com/Maitrimodii/apm_master/internal/log"
-	"github.com/Maitrimodii/apm_master/internal/metric"
-	"github.com/Maitrimodii/apm_master/internal/trace"
 	"github.com/google/uuid"
 	kafkago "github.com/segmentio/kafka-go"
+
+	ingestkafka "github.com/Maitrimodii/apm_master/internal/ingest/kafka"
+	"github.com/Maitrimodii/apm_master/internal/ingest/model"
+	"github.com/Maitrimodii/apm_master/internal/ingest/serializer"
+	"github.com/Maitrimodii/apm_master/internal/logs"
+	"github.com/Maitrimodii/apm_master/internal/metrics"
+	"github.com/Maitrimodii/apm_master/internal/platform/kafkax"
+	"github.com/Maitrimodii/apm_master/internal/platform/retry"
+	"github.com/Maitrimodii/apm_master/internal/traces"
 )
 
 type SpanWriter interface {
-	BulkInsert(context.Context, []trace.Span) error
+	BulkInsert(context.Context, []traces.Span) error
 }
 
 type LogWriter interface {
-	BulkInsert(context.Context, []log.LogRecord) error
+	BulkInsert(context.Context, []logs.LogRecord) error
 }
 
 type MetricWriter interface {
-	BulkInsert(context.Context, []metric.WriteBatch) error
+	BulkInsert(context.Context, []metrics.WriteBatch) error
 }
 
 type Persistence struct {
@@ -53,7 +55,7 @@ func NewRunner(cfg ingestkafka.Config, persistence Persistence, log *slog.Logger
 		log = slog.Default()
 	}
 
-	codec, err := ingestkafka.CompressionCodec(cfg.Compression)
+	codec, err := kafkax.CompressionCodec(cfg.Compression)
 	if err != nil {
 		return nil, err
 	}
@@ -82,46 +84,46 @@ func NewRunner(cfg ingestkafka.Config, persistence Persistence, log *slog.Logger
 	}, nil
 }
 
-func (runner *Runner) Start(ctx context.Context) {
-	ctx, runner.cancel = context.WithCancel(ctx)
-	runner.done = make(chan struct{})
+func (r *Runner) Start(ctx context.Context) {
+	ctx, r.cancel = context.WithCancel(ctx)
+	r.done = make(chan struct{})
 
 	var wg sync.WaitGroup
-	for _, spec := range runner.signalSpecs() {
-		for workerID := 0; workerID < runner.cfg.ConsumerWorkers; workerID++ {
+	for _, spec := range r.signalSpecs() {
+		for workerID := 0; workerID < r.cfg.ConsumerWorkers; workerID++ {
 			wg.Add(1)
 			go func(spec signalSpec, workerID int) {
 				defer wg.Done()
-				runner.consumeSignal(ctx, spec, workerID)
+				r.consumeSignal(ctx, spec, workerID)
 			}(spec, workerID)
 		}
 	}
 
 	go func() {
 		wg.Wait()
-		close(runner.done)
+		close(r.done)
 	}()
 }
 
-func (runner *Runner) Shutdown(ctx context.Context) error {
-	if runner.cancel != nil {
-		runner.cancel()
+func (r *Runner) Shutdown(ctx context.Context) error {
+	if r.cancel != nil {
+		r.cancel()
 	}
 
 	select {
-	case <-runner.done:
+	case <-r.done:
 	case <-ctx.Done():
 		return fmt.Errorf("shutdown kafka consumers: %w", ctx.Err())
 	}
 
-	if err := runner.dlqWriter.Close(); err != nil {
+	if err := r.dlqWriter.Close(); err != nil {
 		return fmt.Errorf("close kafka dlq writer: %w", err)
 	}
 	return nil
 }
 
-func (runner *Runner) Done() <-chan struct{} {
-	return runner.done
+func (r *Runner) Done() <-chan struct{} {
+	return r.done
 }
 
 type signalSpec struct {
@@ -130,38 +132,42 @@ type signalSpec struct {
 	dlq    string
 }
 
-func (runner *Runner) signalSpecs() []signalSpec {
+func (r *Runner) signalSpecs() []signalSpec {
 	return []signalSpec{
-		{signal: model.SignalTraces, topic: runner.cfg.Topics.Traces, dlq: runner.cfg.Topics.TracesDLQ},
-		{signal: model.SignalLogs, topic: runner.cfg.Topics.Logs, dlq: runner.cfg.Topics.LogsDLQ},
-		{signal: model.SignalMetrics, topic: runner.cfg.Topics.Metrics, dlq: runner.cfg.Topics.MetricsDLQ},
+		{signal: model.SignalTraces, topic: r.cfg.Topics.Traces, dlq: r.cfg.Topics.TracesDLQ},
+		{signal: model.SignalLogs, topic: r.cfg.Topics.Logs, dlq: r.cfg.Topics.LogsDLQ},
+		{signal: model.SignalMetrics, topic: r.cfg.Topics.Metrics, dlq: r.cfg.Topics.MetricsDLQ},
 	}
 }
 
-func (runner *Runner) consumeSignal(ctx context.Context, spec signalSpec, workerID int) {
+func (r *Runner) consumeSignal(ctx context.Context, spec signalSpec, workerID int) {
 	reader := kafkago.NewReader(kafkago.ReaderConfig{
-		Brokers:               runner.cfg.Brokers,
-		GroupID:               runner.cfg.GroupID,
+		Brokers:               r.cfg.Brokers,
+		GroupID:               r.cfg.GroupID,
 		Topic:                 spec.topic,
 		MinBytes:              1,
-		MaxBytes:              runner.cfg.ConsumerReadMaxBytes,
-		MaxWait:               runner.cfg.ConsumerFlushInterval,
+		MaxBytes:              r.cfg.ConsumerReadMaxBytes,
+		MaxWait:               r.cfg.ConsumerFlushInterval,
 		CommitInterval:        0,
 		WatchPartitionChanges: true,
 		StartOffset:           kafkago.FirstOffset,
-		MaxAttempts:           runner.cfg.ConsumerMaxAttempts,
-		ReadBackoffMin:        runner.cfg.ConsumerRetryInitial,
-		ReadBackoffMax:        runner.cfg.ConsumerRetryMax,
+		MaxAttempts:           r.cfg.ConsumerMaxAttempts,
+		ReadBackoffMin:        r.cfg.ConsumerRetryInitial,
+		ReadBackoffMax:        r.cfg.ConsumerRetryMax,
 		ErrorLogger: kafkago.LoggerFunc(func(format string, args ...any) {
-			runner.log.Error("kafka consumer error", "signal", spec.signal, "worker_id", workerID, "message", fmt.Sprintf(format, args...))
+			r.log.Error("kafka consumer error", "signal", spec.signal, "worker_id", workerID, "message", fmt.Sprintf(format, args...))
 		}),
 	})
-	defer reader.Close()
+	defer func() {
+		if err := reader.Close(); err != nil {
+			r.log.Warn("close kafka reader", "signal", spec.signal, "error", err)
+		}
+	}()
 
-	runner.log.Info("kafka telemetry consumer started", "signal", spec.signal, "topic", spec.topic, "worker_id", workerID)
+	r.log.Info("kafka telemetry consumer started", "signal", spec.signal, "topic", spec.topic, "worker_id", workerID)
 
-	batch := newMessageBatch(runner.cfg.ConsumerBatchRecords, runner.cfg.ConsumerBatchBytes)
-	ticker := time.NewTicker(runner.cfg.ConsumerFlushInterval)
+	batch := newMessageBatch(r.cfg.ConsumerBatchRecords, r.cfg.ConsumerBatchBytes)
+	ticker := time.NewTicker(r.cfg.ConsumerFlushInterval)
 	defer ticker.Stop()
 
 	type msgOrErr struct {
@@ -187,12 +193,12 @@ func (runner *Runner) consumeSignal(ctx context.Context, spec signalSpec, worker
 	for {
 		select {
 		case <-ctx.Done():
-			_ = runner.flushBatch(context.WithoutCancel(ctx), reader, spec, batch)
-			runner.log.Info("kafka telemetry consumer stopped", "signal", spec.signal, "worker_id", workerID)
+			_ = r.flushBatch(context.WithoutCancel(ctx), reader, spec, batch)
+			r.log.Info("kafka telemetry consumer stopped", "signal", spec.signal, "worker_id", workerID)
 			return
 		case <-ticker.C:
-			if err := runner.flushBatch(ctx, reader, spec, batch); err != nil {
-				runner.log.Error("periodic flush batch failed", "signal", spec.signal, "worker_id", workerID, "error", err)
+			if err := r.flushBatch(ctx, reader, spec, batch); err != nil {
+				r.log.Error("periodic flush batch failed", "signal", spec.signal, "worker_id", workerID, "error", err)
 				time.Sleep(1 * time.Second)
 			}
 		case res, ok := <-msgChan:
@@ -200,15 +206,15 @@ func (runner *Runner) consumeSignal(ctx context.Context, spec signalSpec, worker
 				return
 			}
 			if res.err != nil {
-				runner.log.Error("fetch kafka telemetry message failed", "signal", spec.signal, "worker_id", workerID, "error", res.err)
+				r.log.Error("fetch kafka telemetry message failed", "signal", spec.signal, "worker_id", workerID, "error", res.err)
 				continue
 			}
 
 			batch.add(res.msg)
 
 			if batch.full() {
-				if err := runner.flushBatch(ctx, reader, spec, batch); err != nil {
-					runner.log.Error("full flush batch failed", "signal", spec.signal, "worker_id", workerID, "error", err)
+				if err := r.flushBatch(ctx, reader, spec, batch); err != nil {
+					r.log.Error("full flush batch failed", "signal", spec.signal, "worker_id", workerID, "error", err)
 					time.Sleep(1 * time.Second)
 				}
 			}
@@ -216,14 +222,14 @@ func (runner *Runner) consumeSignal(ctx context.Context, spec signalSpec, worker
 	}
 }
 
-func (runner *Runner) flushBatch(ctx context.Context, reader *kafkago.Reader, spec signalSpec, batch *messageBatch) error {
+func (r *Runner) flushBatch(ctx context.Context, reader *kafkago.Reader, spec signalSpec, batch *messageBatch) error {
 	if batch.len() == 0 {
 		return nil
 	}
 
 	messages := batch.getMessages()
 	start := time.Now()
-	if err := runner.persistBatch(ctx, spec, messages); err != nil {
+	if err := r.persistBatch(ctx, spec, messages); err != nil {
 		return fmt.Errorf("persist batch: %w", err)
 	}
 
@@ -232,22 +238,22 @@ func (runner *Runner) flushBatch(ctx context.Context, reader *kafkago.Reader, sp
 	}
 
 	batch.reset()
-	runner.log.Info("telemetry batch persisted", "signal", spec.signal, "messages", len(messages), "duration_ms", time.Since(start).Milliseconds())
+	r.log.Info("telemetry batch persisted", "signal", spec.signal, "messages", len(messages), "duration_ms", time.Since(start).Milliseconds())
 	return nil
 }
 
-func (runner *Runner) persistBatch(ctx context.Context, spec signalSpec, messages []kafkago.Message) error {
+func (r *Runner) persistBatch(ctx context.Context, spec signalSpec, messages []kafkago.Message) error {
 	validEvents := make([]model.Event, 0, len(messages))
 	for _, msg := range messages {
-		event, err := runner.serializer.Unmarshal(msg.Value)
+		event, err := r.serializer.Unmarshal(msg.Value)
 		if err != nil {
-			if dlqErr := runner.writeDLQ(ctx, spec, msg, err); dlqErr != nil {
+			if dlqErr := r.writeDLQ(ctx, spec, msg, err); dlqErr != nil {
 				return fmt.Errorf("write serialization failure to dlq: %w", dlqErr)
 			}
 			continue
 		}
 		if event.Signal != spec.signal {
-			if dlqErr := runner.writeDLQ(ctx, spec, msg, fmt.Errorf("event signal %q does not match topic signal %q", event.Signal, spec.signal)); dlqErr != nil {
+			if dlqErr := r.writeDLQ(ctx, spec, msg, fmt.Errorf("event signal %q does not match topic signal %q", event.Signal, spec.signal)); dlqErr != nil {
 				return fmt.Errorf("write signal mismatch to dlq: %w", dlqErr)
 			}
 			continue
@@ -255,7 +261,7 @@ func (runner *Runner) persistBatch(ctx context.Context, spec signalSpec, message
 
 		// Validate payload format before bulk insert to catch serialization errors
 		if err := validatePayload(event.Signal, event.Payload); err != nil {
-			if dlqErr := runner.writeDLQ(ctx, spec, msg, fmt.Errorf("invalid payload format: %w", err)); dlqErr != nil {
+			if dlqErr := r.writeDLQ(ctx, spec, msg, fmt.Errorf("invalid payload format: %w", err)); dlqErr != nil {
 				return fmt.Errorf("write invalid payload to dlq: %w", dlqErr)
 			}
 			continue
@@ -269,13 +275,13 @@ func (runner *Runner) persistBatch(ctx context.Context, spec signalSpec, message
 	}
 
 	persist := func() error {
-		return runner.persistEvents(ctx, spec.signal, validEvents)
+		return r.persistEvents(ctx, spec.signal, validEvents)
 	}
 
 	policy := retry.Policy{
-		MaxAttempts: runner.cfg.ConsumerMaxAttempts,
-		Initial:     runner.cfg.ConsumerRetryInitial,
-		Max:         runner.cfg.ConsumerRetryMax,
+		MaxAttempts: r.cfg.ConsumerMaxAttempts,
+		Initial:     r.cfg.ConsumerRetryInitial,
+		Max:         r.cfg.ConsumerRetryMax,
 	}
 	if err := retry.Do(ctx, policy, persist); err != nil {
 		return fmt.Errorf("db bulk insert failed: %w", err)
@@ -287,57 +293,57 @@ func (runner *Runner) persistBatch(ctx context.Context, spec signalSpec, message
 func validatePayload(signal model.Signal, payload []byte) error {
 	switch signal {
 	case model.SignalTraces:
-		_, err := serializer.UnmarshalPayload[[]trace.Span](payload)
+		_, err := serializer.UnmarshalPayload[[]model.SpanV1](payload)
 		return err
 	case model.SignalLogs:
-		_, err := serializer.UnmarshalPayload[[]log.LogRecord](payload)
+		_, err := serializer.UnmarshalPayload[[]model.LogRecordV1](payload)
 		return err
 	case model.SignalMetrics:
-		_, err := serializer.UnmarshalPayload[metric.WriteBatch](payload)
+		_, err := serializer.UnmarshalPayload[model.MetricBatchV1](payload)
 		return err
 	default:
 		return fmt.Errorf("unknown telemetry signal %q", signal)
 	}
 }
 
-func (runner *Runner) persistEvents(ctx context.Context, signal model.Signal, events []model.Event) error {
+func (r *Runner) persistEvents(ctx context.Context, signal model.Signal, events []model.Event) error {
 	switch signal {
 	case model.SignalTraces:
-		records := make([]trace.Span, 0, totalAccepted(events))
+		records := make([]traces.Span, 0, totalAccepted(events))
 		for _, event := range events {
-			payload, err := serializer.UnmarshalPayload[[]trace.Span](event.Payload)
+			payload, err := serializer.UnmarshalPayload[[]model.SpanV1](event.Payload)
 			if err != nil {
 				return err
 			}
-			records = append(records, payload...)
+			records = append(records, model.SpansFromWire(payload)...)
 		}
-		return runner.persistence.Spans.BulkInsert(ctx, records)
+		return r.persistence.Spans.BulkInsert(ctx, records)
 	case model.SignalLogs:
-		records := make([]log.LogRecord, 0, totalAccepted(events))
+		records := make([]logs.LogRecord, 0, totalAccepted(events))
 		for _, event := range events {
-			payload, err := serializer.UnmarshalPayload[[]log.LogRecord](event.Payload)
+			payload, err := serializer.UnmarshalPayload[[]model.LogRecordV1](event.Payload)
 			if err != nil {
 				return err
 			}
-			records = append(records, payload...)
+			records = append(records, model.LogsFromWire(payload)...)
 		}
-		return runner.persistence.Logs.BulkInsert(ctx, records)
+		return r.persistence.Logs.BulkInsert(ctx, records)
 	case model.SignalMetrics:
-		records := make([]metric.WriteBatch, 0, len(events))
+		records := make([]metrics.WriteBatch, 0, len(events))
 		for _, event := range events {
-			payload, err := serializer.UnmarshalPayload[metric.WriteBatch](event.Payload)
+			payload, err := serializer.UnmarshalPayload[model.MetricBatchV1](event.Payload)
 			if err != nil {
 				return err
 			}
-			records = append(records, payload)
+			records = append(records, model.MetricsFromWire(payload))
 		}
-		return runner.persistence.Metrics.BulkInsert(ctx, records)
+		return r.persistence.Metrics.BulkInsert(ctx, records)
 	default:
 		return fmt.Errorf("unknown telemetry signal %q", signal)
 	}
 }
 
-func (runner *Runner) writeDLQ(ctx context.Context, spec signalSpec, msg kafkago.Message, cause error) error {
+func (r *Runner) writeDLQ(ctx context.Context, spec signalSpec, msg kafkago.Message, cause error) error {
 	payload, err := json.Marshal(model.DeadLetterEvent{
 		SchemaVersion: model.SchemaVersion,
 		EventID:       uuid.New(),
@@ -353,7 +359,7 @@ func (runner *Runner) writeDLQ(ctx context.Context, spec signalSpec, msg kafkago
 		return fmt.Errorf("marshal dead-letter event: %w", err)
 	}
 
-	if err := runner.dlqWriter.WriteMessages(ctx, kafkago.Message{
+	if err := r.dlqWriter.WriteMessages(ctx, kafkago.Message{
 		Topic: spec.dlq,
 		Key:   msg.Key,
 		Value: payload,
@@ -362,7 +368,7 @@ func (runner *Runner) writeDLQ(ctx context.Context, spec signalSpec, msg kafkago
 		return fmt.Errorf("write telemetry message to dlq topic %s: %w", spec.dlq, err)
 	}
 
-	runner.log.Warn("telemetry message moved to dlq", "signal", spec.signal, "dlq_topic", spec.dlq, "source_topic", msg.Topic, "partition", msg.Partition, "offset", msg.Offset, "error", cause)
+	r.log.Warn("telemetry message moved to dlq", "signal", spec.signal, "dlq_topic", spec.dlq, "source_topic", msg.Topic, "partition", msg.Partition, "offset", msg.Offset, "error", cause)
 	return nil
 }
 

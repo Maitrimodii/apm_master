@@ -6,10 +6,12 @@ import (
 	"log/slog"
 	"time"
 
+	kafkago "github.com/segmentio/kafka-go"
+
 	ingestkafka "github.com/Maitrimodii/apm_master/internal/ingest/kafka"
 	"github.com/Maitrimodii/apm_master/internal/ingest/model"
 	"github.com/Maitrimodii/apm_master/internal/ingest/serializer"
-	kafkago "github.com/segmentio/kafka-go"
+	"github.com/Maitrimodii/apm_master/internal/platform/kafkax"
 )
 
 type Producer interface {
@@ -29,7 +31,7 @@ func NewKafkaProducer(cfg ingestkafka.Config, log *slog.Logger) (*KafkaProducer,
 		log = slog.Default()
 	}
 
-	codec, err := ingestkafka.CompressionCodec(cfg.Compression)
+	codec, err := kafkax.CompressionCodec(cfg.Compression)
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +47,9 @@ func NewKafkaProducer(cfg ingestkafka.Config, log *slog.Logger) (*KafkaProducer,
 		ReadTimeout:      cfg.ProducerWriteTimeout,
 		RequiredAcks:     cfg.ProducerRequiredAcks,
 		CompressionCodec: codec,
-		Async:            true,
+		// Synchronous: Publish returns only after the brokers acknowledge, so
+		// the ingest API never reports data as accepted that Kafka dropped.
+		Async: false,
 		ErrorLogger: kafkago.LoggerFunc(func(format string, args ...any) {
 			log.Error("kafka producer error", "message", fmt.Sprintf(format, args...))
 		}),
@@ -58,13 +62,13 @@ func NewKafkaProducer(cfg ingestkafka.Config, log *slog.Logger) (*KafkaProducer,
 	}, nil
 }
 
-func (producer *KafkaProducer) Publish(ctx context.Context, event model.Event) error {
-	topic, err := producer.topics.TopicFor(event.Signal)
+func (p *KafkaProducer) Publish(ctx context.Context, event model.Event) error {
+	topic, err := p.topics.TopicFor(event.Signal)
 	if err != nil {
 		return err
 	}
 
-	value, err := producer.serializer.Marshal(event)
+	value, err := p.serializer.Marshal(event)
 	if err != nil {
 		return err
 	}
@@ -88,7 +92,7 @@ func (producer *KafkaProducer) Publish(ctx context.Context, event model.Event) e
 	}
 
 	start := time.Now()
-	if err := producer.writer.WriteMessages(ctx, kafkago.Message{
+	if err := p.writer.WriteMessages(ctx, kafkago.Message{
 		Topic: topic,
 		Key:   key,
 		Value: value,
@@ -103,7 +107,7 @@ func (producer *KafkaProducer) Publish(ctx context.Context, event model.Event) e
 		return fmt.Errorf("publish %s telemetry to kafka topic %s: %w", event.Signal, topic, err)
 	}
 
-	producer.log.Info(
+	p.log.Info(
 		"telemetry event queued asynchronously",
 		"event_id", event.EventID,
 		"signal", event.Signal,
@@ -115,8 +119,8 @@ func (producer *KafkaProducer) Publish(ctx context.Context, event model.Event) e
 	return nil
 }
 
-func (producer *KafkaProducer) Close() error {
-	if err := producer.writer.Close(); err != nil {
+func (p *KafkaProducer) Close() error {
+	if err := p.writer.Close(); err != nil {
 		return fmt.Errorf("close kafka producer: %w", err)
 	}
 	return nil

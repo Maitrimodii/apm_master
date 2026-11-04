@@ -7,9 +7,10 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/Maitrimodii/apm_master/internal/trace"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Maitrimodii/apm_master/internal/traces"
 )
 
 type SpanWriter struct {
@@ -20,7 +21,7 @@ func NewSpanWriter(pool *pgxpool.Pool) *SpanWriter {
 	return &SpanWriter{pool: pool}
 }
 
-func (writer *SpanWriter) BulkInsert(ctx context.Context, spans []trace.Span) error {
+func (w *SpanWriter) BulkInsert(ctx context.Context, spans []traces.Span) error {
 	if len(spans) == 0 {
 		return nil
 	}
@@ -78,7 +79,7 @@ func (writer *SpanWriter) BulkInsert(ctx context.Context, spans []trace.Span) er
 	}
 
 	start := time.Now()
-	_, err := writer.pool.CopyFrom(
+	_, err := w.pool.CopyFrom(
 		ctx,
 		pgx.Identifier{"spans"},
 		cols,

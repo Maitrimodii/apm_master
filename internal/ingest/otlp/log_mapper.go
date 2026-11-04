@@ -3,8 +3,9 @@ package otlp
 import (
 	"time"
 
-	"github.com/Maitrimodii/apm_master/internal/log"
 	"github.com/google/uuid"
+
+	"github.com/Maitrimodii/apm_master/internal/logs"
 )
 
 // severityTextFallback maps OTel severity numbers to text
@@ -19,7 +20,7 @@ var severityTextFallback = map[int16]string{
 	21: "FATAL", 22: "FATAL2", 23: "FATAL3", 24: "FATAL4",
 }
 
-func MapLogsRequest(req IngestLogsRequest, orgID uuid.UUID) (records []log.LogRecord, rejected int) {
+func MapLogsRequest(req IngestLogsRequest, orgID uuid.UUID) (records []logs.LogRecord, rejected int) {
 	for _, rateLimiter := range req.ResourceLogs {
 		for _, sliceItems := range rateLimiter.ScopeLogs {
 			for _, dto := range sliceItems.LogRecords {
@@ -35,7 +36,7 @@ func MapLogsRequest(req IngestLogsRequest, orgID uuid.UUID) (records []log.LogRe
 	return records, rejected
 }
 
-func mapLogRecord(dto LogRecordDTO, resourceAttrs map[string]any, orgID uuid.UUID) (log.LogRecord, error) {
+func mapLogRecord(dto LogRecordDTO, resourceAttrs map[string]any, orgID uuid.UUID) (logs.LogRecord, error) {
 	var timestamp int64
 	if dto.TimeUnixNano != 0 {
 		timestamp = dto.TimeUnixNano
@@ -45,10 +46,10 @@ func mapLogRecord(dto LogRecordDTO, resourceAttrs map[string]any, orgID uuid.UUI
 		timestamp = time.Now().UnixNano()
 	}
 
-	testRunner := time.Unix(0, timestamp).UTC()
+	ts := time.Unix(0, timestamp).UTC()
 
-	if err := validateTime(testRunner); err != nil {
-		return log.LogRecord{}, err
+	if err := validateTime(ts); err != nil {
+		return logs.LogRecord{}, err
 	}
 
 	// Resolve severity text — sender may omit it if they send the number.
@@ -81,8 +82,8 @@ func mapLogRecord(dto LogRecordDTO, resourceAttrs map[string]any, orgID uuid.UUI
 		spanID = &dto.SpanID
 	}
 
-	return log.LogRecord{
-		Time:          testRunner,
+	return logs.LogRecord{
+		Time:          ts,
 		OrgID:         orgID,
 		ServiceName:   serviceName,
 		TraceID:       traceID,

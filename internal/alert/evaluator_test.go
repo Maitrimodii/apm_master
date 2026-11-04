@@ -5,55 +5,56 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Maitrimodii/apm_master/internal/log"
-	"github.com/Maitrimodii/apm_master/internal/metric"
-	"github.com/Maitrimodii/apm_master/internal/trace"
 	"github.com/google/uuid"
+
+	"github.com/Maitrimodii/apm_master/internal/logs"
+	"github.com/Maitrimodii/apm_master/internal/metrics"
+	"github.com/Maitrimodii/apm_master/internal/traces"
 )
 
 type fakeMetricReader struct {
-	points   []metric.MetricPoint
+	points   []metrics.MetricPoint
 	err      error
-	aggValue *metric.MetricAggregation
+	aggValue *metrics.MetricAggregation
 }
 
-func (f fakeMetricReader) GetSeries(ctx context.Context, q metric.SeriesQuery) ([]metric.MetricPoint, metric.Resolution, error) {
+func (f fakeMetricReader) GetSeries(ctx context.Context, q metrics.SeriesQuery) ([]metrics.MetricPoint, metrics.Resolution, error) {
 	if f.err != nil {
-		return nil, metric.ResolutionRaw, f.err
+		return nil, metrics.ResolutionRaw, f.err
 	}
-	return f.points, metric.ResolutionRaw, nil
+	return f.points, metrics.ResolutionRaw, nil
 }
 
-func (f fakeMetricReader) GetAggregations(ctx context.Context, q metric.AggregationQuery) (metric.MetricAggregation, error) {
+func (f fakeMetricReader) GetAggregations(ctx context.Context, q metrics.AggregationQuery) (metrics.MetricAggregation, error) {
 	if f.err != nil {
-		return metric.MetricAggregation{}, f.err
+		return metrics.MetricAggregation{}, f.err
 	}
 	if f.aggValue != nil {
 		return *f.aggValue, nil
 	}
 
 	if len(f.points) == 0 {
-		return metric.MetricAggregation{}, nil
+		return metrics.MetricAggregation{}, nil
 	}
 
 	var total float64
 	var count int64
-	min := f.points[0].MinValue
-	max := f.points[0].MaxValue
+	min := f.points[0].Min
+	max := f.points[0].Max
 
 	for _, p := range f.points {
-		sampleCount := p.SampleCount
+		sampleCount := p.Count
 		if sampleCount == 0 {
 			sampleCount = 1
 		}
-		total += p.AvgValue * float64(sampleCount)
+		total += p.Avg * float64(sampleCount)
 		count += sampleCount
 
-		if p.MinValue < min {
-			min = p.MinValue
+		if p.Min < min {
+			min = p.Min
 		}
-		if p.MaxValue > max {
-			max = p.MaxValue
+		if p.Max > max {
+			max = p.Max
 		}
 	}
 
@@ -62,7 +63,7 @@ func (f fakeMetricReader) GetAggregations(ctx context.Context, q metric.Aggregat
 		avg = total / float64(count)
 	}
 
-	return metric.MetricAggregation{
+	return metrics.MetricAggregation{
 		MetricName: q.MetricName,
 		Count:      count,
 		Total:      total,
@@ -76,11 +77,11 @@ func (f fakeMetricReader) GetAggregations(ctx context.Context, q metric.Aggregat
 }
 
 type fakeLogReader struct {
-	records []log.LogRecord
+	records []logs.LogRecord
 	err     error
 }
 
-func (f fakeLogReader) ListLogs(ctx context.Context, q log.ListLogsQuery) ([]log.LogRecord, int, error) {
+func (f fakeLogReader) ListLogs(ctx context.Context, q logs.ListFilter) ([]logs.LogRecord, int, error) {
 	if f.err != nil {
 		return nil, 0, f.err
 	}
@@ -88,19 +89,19 @@ func (f fakeLogReader) ListLogs(ctx context.Context, q log.ListLogsQuery) ([]log
 }
 
 type fakeTraceReader struct {
-	spans     []trace.Span
-	summaries []trace.TraceSummary
+	spans     []traces.Span
+	summaries []traces.TraceSummary
 	err       error
 }
 
-func (f fakeTraceReader) ListSpans(ctx context.Context, q trace.ListSpansQuery) ([]trace.Span, int, error) {
+func (f fakeTraceReader) ListSpans(ctx context.Context, q traces.ListFilter) ([]traces.Span, int, error) {
 	if f.err != nil {
 		return nil, 0, f.err
 	}
 	return f.spans, len(f.spans), nil
 }
 
-func (f fakeTraceReader) ListTraceSummaries(ctx context.Context, q trace.ListSpansQuery) ([]trace.TraceSummary, int, error) {
+func (f fakeTraceReader) ListTraceSummaries(ctx context.Context, q traces.ListFilter) ([]traces.TraceSummary, int, error) {
 	if f.err != nil {
 		return nil, 0, f.err
 	}
@@ -110,8 +111,8 @@ func (f fakeTraceReader) ListTraceSummaries(ctx context.Context, q trace.ListSpa
 func TestMetricEvaluatorEvaluateFiresWhenThresholdExceeded(testRunner *testing.T) {
 	evaluator := &MetricEvaluator{
 		reader: fakeMetricReader{
-			points: []metric.MetricPoint{
-				{AvgValue: 92.5, SampleCount: 2},
+			points: []metrics.MetricPoint{
+				{Avg: 92.5, Count: 2},
 			},
 		},
 	}
@@ -143,7 +144,7 @@ func TestMetricEvaluatorEvaluateFiresWhenThresholdExceeded(testRunner *testing.T
 func TestMetricEvaluatorPercentilesAndWeightedAverage(testRunner *testing.T) {
 	evaluatorP95 := &MetricEvaluator{
 		reader: fakeMetricReader{
-			aggValue: &metric.MetricAggregation{
+			aggValue: &metrics.MetricAggregation{
 				Count: 10,
 				Avg:   75.0,
 				P95:   95.5,
@@ -174,9 +175,9 @@ func TestMetricEvaluatorPercentilesAndWeightedAverage(testRunner *testing.T) {
 
 	evaluatorWeighted := &MetricEvaluator{
 		reader: fakeMetricReader{
-			points: []metric.MetricPoint{
-				{AvgValue: 10.0, SampleCount: 1},
-				{AvgValue: 100.0, SampleCount: 9},
+			points: []metrics.MetricPoint{
+				{Avg: 10.0, Count: 1},
+				{Avg: 100.0, Count: 9},
 			},
 		},
 	}
@@ -202,30 +203,78 @@ func TestMetricEvaluatorPercentilesAndWeightedAverage(testRunner *testing.T) {
 	}
 }
 
-func TestParseCondition(testRunner *testing.T) {
-	condition := "avg(cpu_usage) > 80 for 5m"
-	parsed, err := parseCondition(condition)
+func TestParseCondition(t *testing.T) {
+	c, err := parseCondition("avg(cpu_usage) > 80 for 5m")
 	if err != nil {
-		testRunner.Fatalf("parseCondition returned error: %v", err)
+		t.Fatalf("parseCondition() error = %v", err)
 	}
-	if parsed.target != "cpu_usage" {
-		testRunner.Fatalf("expected target cpu_usage, got %q", parsed.target)
+	if c.Source != SourceMetric || c.Target != "cpu_usage" || c.Aggregation != "avg" || c.Threshold != 80 || c.Window() != 5*time.Minute {
+		t.Fatalf("parseCondition() = %+v", c)
 	}
-	if parsed.agg != "avg" {
-		testRunner.Fatalf("expected agg avg, got %q", parsed.agg)
+}
+
+func TestParseConditionRejectsBadInput(t *testing.T) {
+	for _, text := range []string{
+		"avg(cpu_usage) > 80 for 5x", // B07: used to become a 0 window and fire instantly
+		"avg(cpu_usage) > 80 for 0s",
+		"rate(http_5xx) > 1",        // unknown aggregation
+		"error_rate(logs) > 1",      // aggregation not valid for logs
+		"kafka_consumer_lag > 5000", // missing agg(...)
+		"",
+	} {
+		if _, err := ParseExpression(text); err == nil {
+			t.Errorf("ParseExpression(%q) error = nil, want error", text)
+		}
 	}
-	if parsed.threshold != 80 {
-		testRunner.Fatalf("expected threshold 80, got %v", parsed.threshold)
+}
+
+func TestSourceRouting(t *testing.T) {
+	tests := map[string]Source{
+		"p95(http_request_duration_ms) > 500":         SourceMetric, // was routed to traces before
+		"count(logs{severity=\"ERROR\"}) > 10":        SourceLog,
+		"avg(spans.duration) > 450ms":                 SourceTrace,
+		"error_rate(spans{service_name=\"web\"}) > 5": SourceTrace,
 	}
-	if parsed.window != 5*time.Minute {
-		testRunner.Fatalf("expected window 5m, got %v", parsed.window)
+	for text, want := range tests {
+		c, err := parseCondition(text)
+		if err != nil {
+			t.Fatalf("parseCondition(%q) error = %v", text, err)
+		}
+		if c.Source != want {
+			t.Errorf("parseCondition(%q).Source = %s, want %s", text, c.Source, want)
+		}
+	}
+}
+
+func TestParseExpressionCompound(t *testing.T) {
+	expr, err := ParseExpression("avg(cpu) > 80 for 2m AND max(mem) > 90 OR count(logs{severity=\"ERROR\"}) > 10 for 10m")
+	if err != nil {
+		t.Fatalf("ParseExpression() error = %v", err)
+	}
+	if len(expr.AnyOf) != 2 || len(expr.AnyOf[0]) != 2 || len(expr.AnyOf[1]) != 1 {
+		t.Fatalf("groups = %+v, want [[cpu, mem], [logs]]", expr.AnyOf)
+	}
+	if expr.Window() != 10*time.Minute {
+		t.Fatalf("Window() = %v, want the longest condition window 10m", expr.Window())
+	}
+}
+
+func TestExpressionEvaluatorSingleConditionKeepsValue(t *testing.T) {
+	reader := fakeMetricReader{aggValue: &metrics.MetricAggregation{Count: 3, Avg: 92.5}}
+	eval := NewExpressionEvaluator(NewMetricEvaluator(reader, nil), NewLogEvaluator(fakeLogReader{}, nil), NewTraceEvaluator(fakeTraceReader{}, nil))
+	res, err := eval.Evaluate(context.Background(), Alert{Condition: "avg(cpu_usage) > 80"})
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if !res.Fired || res.Value != 92.5 || res.Threshold != 80 {
+		t.Fatalf("Evaluate() = %+v, want fired with value 92.5 and threshold 80", res)
 	}
 }
 
 func TestLogEvaluatorEvaluatesCorrectly(testRunner *testing.T) {
 	evaluator := &LogEvaluator{
 		reader: fakeLogReader{
-			records: make([]log.LogRecord, 12),
+			records: make([]logs.LogRecord, 12),
 		},
 	}
 
@@ -253,7 +302,7 @@ func TestLogEvaluatorEvaluatesCorrectly(testRunner *testing.T) {
 func TestTraceEvaluatorEvaluatesDurationAndErrorRate(testRunner *testing.T) {
 	evaluator := &TraceEvaluator{
 		reader: fakeTraceReader{
-			summaries: []trace.TraceSummary{
+			summaries: []traces.TraceSummary{
 				{DurationMS: 600, Status: "ERROR", SpanCount: 5},
 				{DurationMS: 400, Status: "OK", SpanCount: 4},
 			},

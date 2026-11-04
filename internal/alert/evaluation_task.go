@@ -6,291 +6,183 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/Maitrimodii/apm_master/internal/config"
-	"github.com/Maitrimodii/apm_master/internal/log"
-	"github.com/Maitrimodii/apm_master/internal/metric"
-	"github.com/Maitrimodii/apm_master/internal/notification"
-	"github.com/Maitrimodii/apm_master/internal/trace"
 	"github.com/google/uuid"
+
+	"github.com/Maitrimodii/apm_master/internal/notification"
 )
 
-// EvaluationTask evaluates enabled alerts on a fixed cadence.
-// It implements the scheduler.Task interface.
+// LockFunc runs fn while holding a cluster-wide lock and reports whether it
+// ran. It lets only one instance evaluate alerts at a time.
+type LockFunc func(ctx context.Context, fn func(ctx context.Context) error) (bool, error)
+
+// EvaluationTaskDeps are the EvaluationTask's collaborators. Metrics, Logs
+// and Traces read telemetry; Lock may be nil to skip cluster locking.
+type EvaluationTaskDeps struct {
+	Store    Repository
+	Metrics  metricReader
+	Logs     logReader
+	Traces   traceReader
+	Notifier Notifier
+	Lock     LockFunc
+	Interval time.Duration
+	Logger   *slog.Logger
+}
+
+// EvaluationTask evaluates every enabled alert on a fixed cadence. It
+// implements scheduler.Task.
 type EvaluationTask struct {
-	store           AlertStoreInterface
-	metricsStore    metric.MetricStoreInterface
-	tracesStore     trace.TraceStoreInterface
-	logsStore       log.LogStoreInterface
-	notification    *notification.Service
-	log             *slog.Logger
-	interval        time.Duration
-	advisoryLockKey int64
+	store     Repository
+	evaluator *ExpressionEvaluator
+	notifier  *alertNotifier
+	lock      LockFunc
+	interval  time.Duration
+	log       *slog.Logger
 }
 
-// NewEvaluationTask creates a new alert evaluation task.
-func NewEvaluationTask(
-	store AlertStoreInterface,
-	metricsStore metric.MetricStoreInterface,
-	tracesStore trace.TraceStoreInterface,
-	logsStore log.LogStoreInterface,
-	notificationService *notification.Service,
-	cfg *config.Config,
-	logger *slog.Logger,
-) *EvaluationTask {
-	if logger == nil {
-		logger = slog.Default()
+func NewEvaluationTask(deps EvaluationTaskDeps) *EvaluationTask {
+	log := deps.Logger
+	if log == nil {
+		log = slog.Default()
 	}
-	interval := DefaultEvaluationInterval
-	if cfg != nil && cfg.AlertEvaluationInterval > 0 {
-		interval = cfg.AlertEvaluationInterval
+	interval := deps.Interval
+	if interval <= 0 {
+		interval = DefaultEvaluationInterval
 	}
-
 	return &EvaluationTask{
-		store:           store,
-		metricsStore:    metricsStore,
-		tracesStore:     tracesStore,
-		logsStore:       logsStore,
-		notification:    notificationService,
-		log:             logger,
-		interval:        interval,
-		advisoryLockKey: DefaultAdvisoryLockKey,
+		store: deps.Store,
+		evaluator: NewExpressionEvaluator(
+			NewMetricEvaluator(deps.Metrics, log),
+			NewLogEvaluator(deps.Logs, log),
+			NewTraceEvaluator(deps.Traces, log),
+		),
+		notifier: newAlertNotifier(deps.Notifier, deps.Store, log),
+		lock:     deps.Lock,
+		interval: interval,
+		log:      log,
 	}
 }
 
-// Name returns the unique name for this task.
-func (t *EvaluationTask) Name() string {
-	return "alert_evaluation"
-}
+func (t *EvaluationTask) Name() string            { return "alert_evaluation" }
+func (t *EvaluationTask) Interval() time.Duration { return t.interval }
 
-// Interval returns how often this task should run.
-func (t *EvaluationTask) Interval() time.Duration {
-	return t.interval
-}
-
-// Execute performs a single run of alert evaluation.
+// Execute evaluates all enabled alerts once.
 func (t *EvaluationTask) Execute(ctx context.Context) error {
-	if !t.tryAcquireLock(ctx) {
-		t.log.Debug("evaluation skipped, lock held by another instance")
-		return nil
+	if t.lock == nil {
+		return t.evaluateAll(ctx)
 	}
-	defer t.releaseLock(ctx)
+	ran, err := t.lock(ctx, t.evaluateAll)
+	if !ran && err == nil {
+		t.log.DebugContext(ctx, "alert evaluation skipped, another instance holds the lock")
+	}
+	return err
+}
 
-	limit := 500
-	offset := 0
-
-	for {
-		alerts, err := t.store.ListEnabledPage(ctx, limit, offset)
+func (t *EvaluationTask) evaluateAll(ctx context.Context) error {
+	for offset := 0; ; offset += enabledAlertsPageSize {
+		alerts, err := t.store.ListEnabledPage(ctx, enabledAlertsPageSize, offset)
 		if err != nil {
 			return fmt.Errorf("list enabled alerts page: %w", err)
 		}
-
 		for _, alert := range alerts {
 			if err := t.evaluateAlert(ctx, alert); err != nil {
-				t.log.Error("alert evaluation failed", "alert_id", alert.ID, "name", alert.Name, "error", err)
+				t.log.ErrorContext(ctx, "alert evaluation failed", "alert_id", alert.ID, "name", alert.Name, "error", err)
 			}
 		}
-
-		if len(alerts) < limit {
-			break
+		if len(alerts) < enabledAlertsPageSize {
+			return nil
 		}
-		offset += limit
 	}
-
-	return nil
 }
 
-func (t *EvaluationTask) tryAcquireLock(ctx context.Context) bool {
-	if t.store == nil {
-		return true
-	}
-
-	acquired, err := t.store.AcquireLock(ctx, t.advisoryLockKey)
-	if err != nil {
-		t.log.Warn("advisory lock probe failed", "error", err)
-		return false
-	}
-	return acquired
-}
-
-func (t *EvaluationTask) releaseLock(ctx context.Context) {
-	if t.store == nil {
-		return
-	}
-	_ = t.store.ReleaseLock(ctx, t.advisoryLockKey)
-}
-
-// evaluateAlert evaluates a single alert, exporting it here for testing if needed.
 func (t *EvaluationTask) evaluateAlert(ctx context.Context, alert Alert) error {
-	evalCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, evaluationTimeout)
 	defer cancel()
 
-	evaluator := t.evaluatorFor(alert)
-	result, err := evaluator.Evaluate(evalCtx, alert)
+	expr, err := alert.ParsedCondition()
 	if err != nil {
 		return err
 	}
-
+	result, err := t.evaluator.Evaluate(ctx, alert)
+	if err != nil {
+		return err
+	}
 	if !result.Fired {
-		return t.resolveIfNeeded(evalCtx, alert)
+		return t.resolveIfNeeded(ctx, alert)
 	}
-
-	return t.fireIfNeeded(evalCtx, alert, result)
+	return t.fireIfNeeded(ctx, alert, expr.Window(), result)
 }
 
-func (t *EvaluationTask) evaluatorFor(alert Alert) Evaluator {
-	return NewCompoundEvaluator(t.metricsStore, t.logsStore, t.tracesStore, t.log)
-}
-
-func (t *EvaluationTask) fireIfNeeded(ctx context.Context, alert Alert, result *EvaluationResult) error {
-	instance, err := t.store.GetActiveInstance(ctx, alert.ID)
+// fireIfNeeded opens a PENDING instance on the first breach and promotes it
+// to FIRING once the breach has lasted the expression's window.
+func (t *EvaluationTask) fireIfNeeded(ctx context.Context, alert Alert, window time.Duration, result *EvaluationResult) error {
+	inst, err := t.store.GetActiveInstance(ctx, alert.ID)
 	if err != nil {
 		return err
 	}
+	now := time.Now().UTC()
 
-	cond, err := parseCondition(alert.Condition)
-	if err != nil {
-		return err
-	}
-	window := cond.window
-
-	if instance == nil {
-		now := time.Now().UTC()
-		
-		state := string(AlertStatePending)
-		var pendingFiredAt *time.Time
+	if inst == nil {
+		inst = &AlertInstance{
+			ID:              uuid.New(),
+			AlertID:         alert.ID,
+			State:           AlertStatePending,
+			PendingFiredAt:  &now,
+			TriggeredAt:     now,
+			LastEvaluatedAt: now,
+			Value:           result.Value,
+			Threshold:       result.Threshold,
+			Message:         result.Message,
+		}
 		if window == 0 {
-			state = string(AlertStateFiring)
-		} else {
-			pendingFiredAt = &now
+			inst.State, inst.PendingFiredAt = AlertStateFiring, nil
 		}
-
-		instance = &AlertInstance{
-			ID:               uuid.New(),
-			AlertID:          alert.ID,
-			State:            state,
-			PendingFiredAt:   pendingFiredAt,
-			TriggeredAt:      now,
-			LastEvaluatedAt:  now,
-			Value:            result.Value,
-			Threshold:        result.Threshold,
-			Message:          result.Message,
-			NotificationSent: false,
-		}
-		if err := t.store.SaveInstance(ctx, *instance); err != nil {
+		if err := t.store.SaveInstance(ctx, *inst); err != nil {
 			return err
 		}
-		
-		if state == string(AlertStateFiring) {
-			return t.notify(ctx, alert, instance, "alert_firing")
+		if inst.State == AlertStateFiring {
+			t.notifier.transition(ctx, alert, *inst, notification.EventAlertFiring)
 		}
 		return nil
 	}
 
-	now := time.Now().UTC()
-	instance.Value = result.Value
-	instance.Threshold = result.Threshold
-	instance.Message = result.Message
-	instance.LastEvaluatedAt = now
+	inst.Value, inst.Threshold, inst.Message = result.Value, result.Threshold, result.Message
+	inst.LastEvaluatedAt = now
 
-	if instance.State == string(AlertStatePending) {
-		if instance.PendingFiredAt != nil && time.Since(*instance.PendingFiredAt) >= window {
-			instance.State = string(AlertStateFiring)
-			if err := t.store.SaveInstance(ctx, *instance); err != nil {
-				return err
-			}
-			return t.notify(ctx, alert, instance, "alert_firing")
+	if inst.State == AlertStatePending {
+		if inst.PendingFiredAt == nil || time.Since(*inst.PendingFiredAt) < window {
+			return t.store.SaveInstance(ctx, *inst)
 		}
-		return t.store.SaveInstance(ctx, *instance)
+		inst.State = AlertStateFiring
+		if err := t.store.SaveInstance(ctx, *inst); err != nil {
+			return err
+		}
+		t.notifier.transition(ctx, alert, *inst, notification.EventAlertFiring)
+		return nil
 	}
 
-	instance.NotificationSent = true
-	if err := t.store.SaveInstance(ctx, *instance); err != nil {
-		return err
-	}
-	return nil
+	inst.NotificationSent = true
+	return t.store.SaveInstance(ctx, *inst)
 }
 
+// resolveIfNeeded resolves a FIRING or ACKNOWLEDGED instance once the
+// condition no longer holds. A PENDING instance that recovers is left to be
+// promoted or superseded on later evaluations.
 func (t *EvaluationTask) resolveIfNeeded(ctx context.Context, alert Alert) error {
-	instance, err := t.store.GetActiveInstance(ctx, alert.ID)
+	inst, err := t.store.GetActiveInstance(ctx, alert.ID)
 	if err != nil {
 		return err
 	}
-	if instance == nil || (instance.State != string(AlertStateFiring) && instance.State != string(AlertStateAcknowledged)) {
+	if inst == nil || (inst.State != AlertStateFiring && inst.State != AlertStateAcknowledged) {
 		return nil
 	}
-
-	resolvedAt := time.Now().UTC()
-	instance.State = string(AlertStateResolved)
-	instance.ResolvedAt = &resolvedAt
-	instance.LastEvaluatedAt = resolvedAt
-	instance.Message = "Alert resolved after evaluation returned to normal"
-	if err := t.store.SaveInstance(ctx, *instance); err != nil {
+	now := time.Now().UTC()
+	inst.State = AlertStateResolved
+	inst.ResolvedAt = &now
+	inst.LastEvaluatedAt = now
+	inst.Message = "Alert resolved after evaluation returned to normal"
+	if err := t.store.SaveInstance(ctx, *inst); err != nil {
 		return err
 	}
-	return t.notify(ctx, alert, instance, "alert_resolved")
-}
-
-func (t *EvaluationTask) notify(ctx context.Context, alert Alert, instance *AlertInstance, eventType string) error {
-	if t.notification == nil {
-		return nil
-	}
-
-	subject := fmt.Sprintf("Alert %s", alert.Name)
-	body := fmt.Sprintf("Alert %q is %s. Current value %.2f, threshold %.2f. %s", alert.Name, instance.State, instance.Value, instance.Threshold, instance.Message)
-
-	if eventType == "alert_resolved" {
-		subject = fmt.Sprintf("Resolved: %s", alert.Name)
-		body = fmt.Sprintf("Alert %q has resolved. Current value %.2f, threshold %.2f.", alert.Name, instance.Value, instance.Threshold)
-	} else if eventType == "alert_acknowledged" {
-		subject = fmt.Sprintf("Acknowledged: %s", alert.Name)
-		body = fmt.Sprintf("Alert %q has been acknowledged. Current value %.2f, threshold %.2f.", alert.Name, instance.Value, instance.Threshold)
-	}
-
-	_, err := t.notification.RecordEvent(ctx, notification.Event{
-		OrgID:     alert.OrgID,
-		UserID:    &alert.CreatedBy,
-		EventType: eventType,
-		Channel:   notification.ChannelInApp,
-		Recipient: alert.CreatedBy.String(),
-		Subject:   subject,
-		Body:      body,
-		Status:    notification.StatusPending,
-		Metadata:  []byte(fmt.Sprintf(`{"alert_id":"%s","instance_id":"%s"}`, alert.ID.String(), instance.ID.String())),
-	})
-	if err != nil {
-		t.log.Error("record alert event failed", "alert_id", alert.ID, "error", err)
-	}
-
-	// Resolve notification roles and enqueue email jobs
-	resolvedUsers, resolveErr := t.store.ResolveUsersByRoles(ctx, alert.OrgID, alert.NotificationRoles)
-	if resolveErr != nil {
-		t.log.Error("failed to resolve notification roles for email notification", "alert_id", alert.ID, "roles", alert.NotificationRoles, "error", resolveErr)
-	} else {
-		for _, resolvedUser := range resolvedUsers {
-			enqueueErr := t.notification.EnqueueHighPriorityEmail(ctx, notification.NotificationTask{
-				OrgID:       alert.OrgID,
-				UserID:      &resolvedUser.ID,
-				EventType:   eventType,
-				Recipient:   resolvedUser.Email,
-				Subject:     subject,
-				Body:        body,
-				ReferenceID: fmt.Sprintf("%s:%s", instance.ID.String(), eventType),
-				Metadata: map[string]string{
-					"alert_id":    alert.ID.String(),
-					"instance_id": instance.ID.String(),
-					"alert_name":  alert.Name,
-					"value":       fmt.Sprintf("%.2f", instance.Value),
-					"threshold":   fmt.Sprintf("%.2f", instance.Threshold),
-					"state":       string(instance.State),
-					"severity":    alert.Severity,
-					"condition":   alert.Condition,
-				},
-			})
-			if enqueueErr != nil {
-				t.log.Error("failed to enqueue email notification", "alert_id", alert.ID, "recipient", resolvedUser.Email, "error", enqueueErr)
-			}
-		}
-	}
-
-	return err
+	t.notifier.transition(ctx, alert, *inst, notification.EventAlertResolved)
+	return nil
 }

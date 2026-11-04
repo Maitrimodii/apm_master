@@ -5,11 +5,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/Maitrimodii/apm_master/internal/ingest/model"
 	"github.com/Maitrimodii/apm_master/internal/ingest/otlp"
 	"github.com/Maitrimodii/apm_master/internal/ingest/serializer"
-	"github.com/Maitrimodii/apm_master/internal/trace"
-	"github.com/google/uuid"
+	"github.com/Maitrimodii/apm_master/internal/traces"
 )
 
 type recordingProducer struct {
@@ -60,8 +61,8 @@ func TestIngestTracesPublishesKafkaEvent(testRunner *testing.T) {
 	if event.Signal != model.SignalTraces {
 		testRunner.Fatalf("event signal = %q, want %q", event.Signal, model.SignalTraces)
 	}
-	if event.OrgID != orgID || event.TenantID != orgID {
-		testRunner.Fatalf("event org/tenant = %s/%s, want %s", event.OrgID, event.TenantID, orgID)
+	if event.OrgID != orgID {
+		testRunner.Fatalf("event org = %s, want %s", event.OrgID, orgID)
 	}
 	if event.TraceID != "trace-1" {
 		testRunner.Fatalf("event trace_id = %q, want %q", event.TraceID, "trace-1")
@@ -70,7 +71,7 @@ func TestIngestTracesPublishesKafkaEvent(testRunner *testing.T) {
 		testRunner.Fatalf("event service_name = %q, want %q", event.ServiceName, "checkout")
 	}
 
-	spans, err := serializer.UnmarshalPayload[[]trace.Span](event.Payload)
+	spans, err := serializer.UnmarshalPayload[[]traces.Span](event.Payload)
 	if err != nil {
 		testRunner.Fatalf("unmarshal payload: %v", err)
 	}

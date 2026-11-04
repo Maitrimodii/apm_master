@@ -1,6 +1,8 @@
 package alert
 
-// AlertState defines the lifecycle state of an alert instance.
+import "strings"
+
+// AlertState is the lifecycle state of an alert instance.
 type AlertState string
 
 const (
@@ -10,12 +12,26 @@ const (
 	AlertStateResolved     AlertState = "RESOLVED"
 )
 
-// AlertSeverity defines the urgency classification for an alert.
-type AlertSeverity string
+// activeStates are the states an instance can be in before it resolves,
+// as plain strings for use as a SQL array parameter.
+var activeStates = []string{string(AlertStatePending), string(AlertStateFiring), string(AlertStateAcknowledged)}
+
+// Severity is the urgency of an alert definition. Stored lowercase.
+type Severity string
 
 const (
-	SeverityCritical AlertSeverity = "critical"
-	SeverityHigh     AlertSeverity = "high"
-	SeverityMedium   AlertSeverity = "medium"
-	SeverityLow      AlertSeverity = "low"
+	SeverityLow      Severity = "low"
+	SeverityMedium   Severity = "medium"
+	SeverityHigh     Severity = "high"
+	SeverityCritical Severity = "critical"
 )
+
+// ParseSeverity accepts any letter case ("CRITICAL", "critical").
+func ParseSeverity(s string) (Severity, bool) {
+	sev := Severity(strings.ToLower(strings.TrimSpace(s)))
+	switch sev {
+	case SeverityLow, SeverityMedium, SeverityHigh, SeverityCritical:
+		return sev, true
+	}
+	return "", false
+}

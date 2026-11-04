@@ -9,13 +9,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Maitrimodii/apm_master/test/e2e/framework"
 	"github.com/google/uuid"
+
+	"github.com/Maitrimodii/apm_master/test/e2e/framework"
 )
 
 func TestTraceFlow(t *testing.T) {
 	ctx := framework.SetupOrgAndUser(t)
-	
+
 	// Create a unique trace ID (hex string, typically 32 chars)
 	traceID := uuid.New().String()
 	traceIDHex := traceID[:32] // taking 32 chars as traceid
@@ -44,20 +45,20 @@ func TestTraceFlow(t *testing.T) {
 		var traceFound bool
 		for i := 0; i < 10; i++ {
 			time.Sleep(1 * time.Second)
-			
+
 			listReq, _ := http.NewRequest("GET", ctx.BaseURL+"/api/v1/traces", nil)
 			listReq.Header.Set("Authorization", "Bearer "+ctx.AccessToken)
-			
+
 			listResp, err := ctx.HTTPClient.Do(listReq)
 			if err != nil {
 				continue // retry
 			}
-			
+
 			if listResp.StatusCode == http.StatusOK {
 				var result map[string]interface{}
 				json.NewDecoder(listResp.Body).Decode(&result)
 				listResp.Body.Close()
-				
+
 				// Very basic check - if it returns an array of traces, we succeeded.
 				// In a real scenario, we'd loop through result["data"] to find `traceIDHex`.
 				// Since we just want to ensure it doesn't fail and is eventually consistent:
@@ -73,11 +74,11 @@ func TestTraceFlow(t *testing.T) {
 		if !traceFound {
 			t.Log("Warning: Trace did not appear in /api/v1/traces within 10 seconds. Kafka consumer might be slow or inactive.")
 		}
-		
+
 		// 3. Fetch single trace by ID
 		getReq, _ := http.NewRequest("GET", ctx.BaseURL+"/api/v1/traces/"+traceIDHex, nil)
 		getReq.Header.Set("Authorization", "Bearer "+ctx.AccessToken)
-		
+
 		getResp, err := ctx.HTTPClient.Do(getReq)
 		if err != nil {
 			t.Fatalf("Failed to call get single trace: %v", err)

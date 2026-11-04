@@ -5,15 +5,16 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/Maitrimodii/apm_master/internal/config"
 	"github.com/Maitrimodii/apm_master/internal/ingest/consumer"
 	ingestkafka "github.com/Maitrimodii/apm_master/internal/ingest/kafka"
 	"github.com/Maitrimodii/apm_master/internal/ingest/producer"
 	"github.com/Maitrimodii/apm_master/internal/ingest/services"
 	"github.com/Maitrimodii/apm_master/internal/ingest/writer"
-	"github.com/Maitrimodii/apm_master/internal/server/middleware"
-	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/Maitrimodii/apm_master/internal/platform/middleware"
 )
 
 type Module struct {
@@ -26,14 +27,14 @@ func NewModule(
 	ctx context.Context,
 	database *pgxpool.Pool,
 	cfg *config.Config,
-	inviteService middleware.APIKeyValidator,
+	apiKeys middleware.APIKeyValidator,
 	log *slog.Logger,
 ) (*Module, error) {
 
 	traceWriter := writer.NewSpanWriter(database)
 	logWriter := writer.NewLogWriter(database)
 	metricWriter := writer.NewMetricWriter(database)
-	kafkaCfg := ingestkafka.FromAppConfig(cfg)
+	kafkaCfg := ingestkafka.FromAppConfig(cfg.Kafka)
 
 	if err := ingestkafka.EnsureTopics(ctx, kafkaCfg); err != nil {
 		return nil, fmt.Errorf("ensure kafka ingest topics: %w", err)
@@ -62,28 +63,24 @@ func NewModule(
 	return &Module{
 		handler: NewHandler(
 			service,
-			inviteService,
+			apiKeys,
 		),
 		producer: kafkaProducer,
 		consumer: kafkaConsumer,
 	}, nil
 }
 
-func (module *Module) RegisterRoutes(
-	routerGroup *gin.RouterGroup,
-) {
-	module.handler.RegisterRoutes(routerGroup)
+func (m *Module) RegisterRoutes(routerGroup *gin.RouterGroup) {
+	m.handler.RegisterRoutes(routerGroup)
 }
 
-func (module *Module) Shutdown(
-	ctx context.Context,
-) error {
+func (m *Module) Shutdown(ctx context.Context) error {
 
-	if err := module.producer.Close(); err != nil {
+	if err := m.producer.Close(); err != nil {
 		return err
 	}
 
-	if err := module.consumer.Shutdown(ctx); err != nil {
+	if err := m.consumer.Shutdown(ctx); err != nil {
 		return err
 	}
 

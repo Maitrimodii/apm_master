@@ -20,7 +20,7 @@ func NewStore(database *pgxpool.Pool) *Store {
 	return &Store{database: database}
 }
 
-func (store *Store) CreateEvent(ctx context.Context, event Event) (*Event, error) {
+func (s *Store) CreateEvent(ctx context.Context, event Event) (*Event, error) {
 	if event.Metadata == nil {
 		event.Metadata = []byte("{}")
 	}
@@ -33,7 +33,7 @@ func (store *Store) CreateEvent(ctx context.Context, event Event) (*Event, error
 		RETURNING id, created_at
 	`
 
-	err := store.database.QueryRow(
+	err := s.database.QueryRow(
 		ctx,
 		query,
 		event.OrgID,
@@ -55,7 +55,7 @@ func (store *Store) CreateEvent(ctx context.Context, event Event) (*Event, error
 	return &event, nil
 }
 
-func (store *Store) ExistsByReference(ctx context.Context, referenceID, recipient, eventType string) (bool, error) {
+func (s *Store) ExistsByReference(ctx context.Context, referenceID, recipient string, eventType EventType) (bool, error) {
 	queryEvents := `
 		SELECT id
 		FROM notification_events
@@ -66,7 +66,7 @@ func (store *Store) ExistsByReference(ctx context.Context, referenceID, recipien
 	`
 
 	var identifier string
-	err := store.database.QueryRow(ctx, queryEvents, referenceID, recipient, eventType).Scan(&identifier)
+	err := s.database.QueryRow(ctx, queryEvents, referenceID, recipient, eventType).Scan(&identifier)
 	if err == nil {
 		return true, nil
 	}
@@ -83,7 +83,7 @@ func (store *Store) ExistsByReference(ctx context.Context, referenceID, recipien
 			AND state IN ('pending', 'processing', 'sent')
 		LIMIT 1
 	`
-	err = store.database.QueryRow(ctx, queryJobs, referenceID, recipient, eventType).Scan(&identifier)
+	err = s.database.QueryRow(ctx, queryJobs, referenceID, recipient, eventType).Scan(&identifier)
 	if err == nil {
 		return true, nil
 	}
@@ -94,7 +94,7 @@ func (store *Store) ExistsByReference(ctx context.Context, referenceID, recipien
 	return false, nil
 }
 
-func (store *Store) CreateJob(ctx context.Context, task NotificationTask, maxAttempts int) error {
+func (s *Store) CreateJob(ctx context.Context, task Task, maxAttempts int) error {
 	query := `
 		INSERT INTO notification_jobs (
 			org_id, user_id, event_type, provider, recipient, subject, body, reference_id, metadata, state, attempts, max_attempts, run_at, priority
@@ -106,13 +106,13 @@ func (store *Store) CreateJob(ctx context.Context, task NotificationTask, maxAtt
 		return fmt.Errorf("marshal metadata: %w", err)
 	}
 
-	_, err = store.database.Exec(ctx, query,
+	_, err = s.database.Exec(ctx, query,
 		task.OrgID, task.UserID, task.EventType, task.Provider, task.Recipient, task.Subject, task.Body, task.ReferenceID, metadataJSON, maxAttempts, task.Priority,
 	)
 	return err
 }
 
-func (store *Store) FetchNextJob(ctx context.Context) (*NotificationJob, error) {
+func (s *Store) FetchNextJob(ctx context.Context) (*Job, error) {
 	query := `
 		UPDATE notification_jobs
 		SET state = 'processing',
@@ -130,9 +130,9 @@ func (store *Store) FetchNextJob(ctx context.Context) (*NotificationJob, error) 
 		RETURNING id, org_id, user_id, event_type, provider, recipient, subject, body, COALESCE(reference_id, ''), metadata, state, attempts, max_attempts, run_at, last_error, created_at, updated_at, priority
 	`
 
-	var job NotificationJob
+	var job Job
 	var metadataBytes []byte
-	err := store.database.QueryRow(ctx, query).Scan(
+	err := s.database.QueryRow(ctx, query).Scan(
 		&job.ID, &job.OrgID, &job.UserID, &job.EventType, &job.Provider, &job.Recipient, &job.Subject, &job.Body, &job.ReferenceID, &metadataBytes, &job.State, &job.Attempts, &job.MaxAttempts, &job.RunAt, &job.LastError, &job.CreatedAt, &job.UpdatedAt, &job.Priority,
 	)
 	if err != nil {
@@ -151,7 +151,7 @@ func (store *Store) FetchNextJob(ctx context.Context) (*NotificationJob, error) 
 	return &job, nil
 }
 
-func (store *Store) UpdateJobState(ctx context.Context, jobID uuid.UUID, state string, lastErr string, attempts int, runAt *time.Time) error {
+func (s *Store) UpdateJobState(ctx context.Context, jobID uuid.UUID, state JobState, lastErr string, attempts int, runAt *time.Time) error {
 	var query string
 	var err error
 	var lastErrPtr *string
@@ -169,7 +169,7 @@ func (store *Store) UpdateJobState(ctx context.Context, jobID uuid.UUID, state s
 				updated_at = now()
 			WHERE id = $1
 		`
-		_, err = store.database.Exec(ctx, query, jobID, state, lastErrPtr, attempts, *runAt)
+		_, err = s.database.Exec(ctx, query, jobID, state, lastErrPtr, attempts, *runAt)
 	} else {
 		query = `
 			UPDATE notification_jobs
@@ -179,7 +179,7 @@ func (store *Store) UpdateJobState(ctx context.Context, jobID uuid.UUID, state s
 				updated_at = now()
 			WHERE id = $1
 		`
-		_, err = store.database.Exec(ctx, query, jobID, state, lastErrPtr, attempts)
+		_, err = s.database.Exec(ctx, query, jobID, state, lastErrPtr, attempts)
 	}
 	return err
 }

@@ -8,7 +8,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -30,7 +29,8 @@ func (s *Store) CreateWithOutbox(
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	// Rollback after a successful Commit is a no-op.
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	if inv.ID == uuid.Nil {
 		inv.ID = uuid.New()
@@ -39,12 +39,15 @@ func (s *Store) CreateWithOutbox(
 		inv.Status = StatusQueued
 	}
 
+	// ON CONFLICT keeps the transaction usable: a failed INSERT would abort it
+	// and the lookup of the existing row below would fail too.
 	query := `
 		INSERT INTO investigations (
 			id, org_id, incident_id, requested_by, status,
 			time_range_start, time_range_end, focus, correlation_id,
 			idempotency_key, parent_investigation_id, created_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+		ON CONFLICT ON CONSTRAINT investigations_idempotency DO NOTHING
 		RETURNING id, created_at
 	`
 	err = tx.QueryRow(
@@ -53,17 +56,15 @@ func (s *Store) CreateWithOutbox(
 		inv.TimeRangeStart, inv.TimeRangeEnd, inv.Focus, inv.CorrelationID,
 		inv.IdempotencyKey, inv.ParentInvestigationID,
 	).Scan(&inv.ID, &inv.CreatedAt)
-
-	if err != nil {
-		// Check for idempotency key duplicate
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" && inv.IdempotencyKey != nil {
-			// Fetch existing investigation
-			existing, fetchErr := s.getByOrgAndIdempotencyKeyTx(ctx, tx, inv.OrgID, *inv.IdempotencyKey)
-			if fetchErr == nil && existing != nil {
-				return existing, nil
-			}
+	if errors.Is(err, pgx.ErrNoRows) && inv.IdempotencyKey != nil {
+		// Same idempotency key as an earlier request: return that investigation.
+		existing, fetchErr := s.getByOrgAndIdempotencyKeyTx(ctx, tx, inv.OrgID, *inv.IdempotencyKey)
+		if fetchErr != nil {
+			return nil, fmt.Errorf("load investigation for idempotency key: %w", fetchErr)
 		}
+		return existing, nil
+	}
+	if err != nil {
 		return nil, fmt.Errorf("insert investigation: %w", err)
 	}
 
@@ -186,6 +187,9 @@ func (s *Store) List(ctx context.Context, orgID, incidentID uuid.UUID, limit, of
 }
 
 // UpdateStatus performs a conditional state transition.
+// UpdateStatus moves an investigation from prevStatus to newStatus. It
+// returns ErrInvalidTransition if the row is no longer in prevStatus (another
+// writer got there first), so concurrent updates cannot skip the state machine.
 func (s *Store) UpdateStatus(
 	ctx context.Context,
 	investigationID uuid.UUID,
@@ -197,13 +201,13 @@ func (s *Store) UpdateStatus(
 	query := `
 		UPDATE investigations
 		SET status = $1,
-		    started_at = CASE WHEN $1 = 'running' AND started_at IS NULL THEN now() ELSE started_at END,
-		    completed_at = CASE WHEN $1 IN ('completed','inconclusive','failed','cancelled','timed_out') AND completed_at IS NULL THEN now() ELSE completed_at END,
+		    started_at = CASE WHEN $1 = $6 AND started_at IS NULL THEN now() ELSE started_at END,
+		    completed_at = CASE WHEN $1 = ANY($7::text[]) AND completed_at IS NULL THEN now() ELSE completed_at END,
 		    failure_code = COALESCE($2, failure_code),
 		    failure_message = COALESCE($3, failure_message)
 		WHERE id = $4 AND status = $5
 	`
-	cmd, err := s.pool.Exec(ctx, query, newStatus, failureCode, failureMessage, investigationID, prevStatus)
+	cmd, err := s.pool.Exec(ctx, query, newStatus, failureCode, failureMessage, investigationID, prevStatus, StatusRunning, terminalStatusList())
 	if err != nil {
 		return fmt.Errorf("update status: %w", err)
 	}
@@ -213,44 +217,20 @@ func (s *Store) UpdateStatus(
 	return nil
 }
 
-// UpdateStatusDirect sets status without requiring a previous status match (for internal sync).
-func (s *Store) UpdateStatusDirect(
-	ctx context.Context,
-	investigationID uuid.UUID,
-	newStatus InvestigationStatus,
-	failureCode *string,
-	failureMessage *string,
-) error {
-	query := `
-		UPDATE investigations
-		SET status = $1,
-		    started_at = CASE WHEN $1 = 'running' AND started_at IS NULL THEN now() ELSE started_at END,
-		    completed_at = CASE WHEN $1 IN ('completed','inconclusive','failed','cancelled','timed_out') AND completed_at IS NULL THEN now() ELSE completed_at END,
-		    failure_code = COALESCE($2, failure_code),
-		    failure_message = COALESCE($3, failure_message)
-		WHERE id = $4
-	`
-	_, err := s.pool.Exec(ctx, query, newStatus, failureCode, failureMessage, investigationID)
-	if err != nil {
-		return fmt.Errorf("update status direct: %w", err)
-	}
-	return nil
-}
-
 // Cancel sets cancel_requested_at and cancels queued investigations.
 func (s *Store) Cancel(ctx context.Context, orgID, investigationID uuid.UUID) (*Investigation, error) {
 	query := `
 		UPDATE investigations
 		SET cancel_requested_at = COALESCE(cancel_requested_at, now()),
-		    status = CASE WHEN status = 'queued' THEN 'cancelled' ELSE status END,
-		    completed_at = CASE WHEN status = 'queued' THEN now() ELSE completed_at END
+		    status = CASE WHEN status = $3 THEN $4 ELSE status END,
+		    completed_at = CASE WHEN status = $3 THEN now() ELSE completed_at END
 		WHERE org_id = $1 AND id = $2
 		RETURNING id, org_id, incident_id, requested_by, status,
 		          time_range_start, time_range_end, focus, correlation_id,
 		          idempotency_key, parent_investigation_id, cancel_requested_at,
 		          created_at, started_at, completed_at, failure_code, failure_message
 	`
-	inv, err := scanInvestigation(s.pool.QueryRow(ctx, query, orgID, investigationID))
+	inv, err := scanInvestigation(s.pool.QueryRow(ctx, query, orgID, investigationID, StatusQueued, StatusCancelled))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrInvestigationNotFound
@@ -265,10 +245,10 @@ func (s *Store) CountRunningByTenant(ctx context.Context, orgID uuid.UUID) (int,
 	query := `
 		SELECT count(*)
 		FROM investigations
-		WHERE org_id = $1 AND status IN ('queued', 'running')
+		WHERE org_id = $1 AND status = ANY($2::text[])
 	`
 	var count int
-	err := s.pool.QueryRow(ctx, query, orgID).Scan(&count)
+	err := s.pool.QueryRow(ctx, query, orgID, []string{string(StatusQueued), string(StatusRunning)}).Scan(&count)
 	return count, err
 }
 
@@ -407,19 +387,31 @@ func (s *Store) GetReport(ctx context.Context, orgID, investigationID uuid.UUID)
 
 // Events methods
 
+// AppendEvent stores an event. A zero SequenceNumber means "next": the
+// store assigns MAX+1 for the investigation, so retried attempts keep one
+// ordered timeline.
 func (s *Store) AppendEvent(ctx context.Context, ev *InvestigationEvent) error {
 	if ev.ID == uuid.Nil {
 		ev.ID = uuid.New()
 	}
-	payloadJSON, _ := json.Marshal(ev.Payload)
-
+	payloadJSON, err := json.Marshal(ev.Payload)
+	if err != nil {
+		return fmt.Errorf("encode event payload: %w", err)
+	}
 	query := `
 		INSERT INTO investigation_events (
 			id, investigation_id, sequence_number, event_type, summary, payload, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, now())
+		)
+		SELECT $1, $2,
+		       CASE WHEN $3 > 0 THEN $3 ELSE COALESCE(MAX(sequence_number), 0) + 1 END,
+		       $4, $5, $6, now()
+		FROM investigation_events WHERE investigation_id = $2
+		RETURNING sequence_number
 	`
-	_, err := s.pool.Exec(ctx, query, ev.ID, ev.InvestigationID, ev.SequenceNumber, ev.EventType, ev.Summary, payloadJSON)
-	return err
+	if err := s.pool.QueryRow(ctx, query, ev.ID, ev.InvestigationID, ev.SequenceNumber, ev.EventType, ev.Summary, payloadJSON).Scan(&ev.SequenceNumber); err != nil {
+		return fmt.Errorf("append investigation event: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) ListEvents(ctx context.Context, orgID, investigationID uuid.UUID) ([]InvestigationEvent, error) {
@@ -450,30 +442,6 @@ func (s *Store) ListEvents(ctx context.Context, orgID, investigationID uuid.UUID
 }
 
 // Incident context for internal API
-func (s *Store) GetIncidentContext(ctx context.Context, incidentID uuid.UUID) (*IncidentContext, error) {
-	query := `
-		SELECT ai.id, ai.alert_id, a.org_id, a.name, a.severity, a.condition,
-		       ai.service_name, ai.triggered_at, ai.resolved_at,
-		       ai.value, ai.threshold, ai.message
-		FROM alert_instances ai
-		JOIN alerts a ON ai.alert_id = a.id
-		WHERE ai.id = $1
-	`
-	var ic IncidentContext
-	err := s.pool.QueryRow(ctx, query, incidentID).Scan(
-		&ic.IncidentID, &ic.AlertID, &ic.OrgID, &ic.AlertName, &ic.Severity, &ic.Condition,
-		&ic.ServiceName, &ic.TriggeredAt, &ic.ResolvedAt,
-		&ic.Value, &ic.Threshold, &ic.Message,
-	)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("get incident context: %w", err)
-	}
-	return &ic, nil
-}
-
 // Helpers
 
 func scanInvestigation(row pgx.Row) (*Investigation, error) {

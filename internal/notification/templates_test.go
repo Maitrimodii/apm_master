@@ -8,7 +8,7 @@ import (
 func TestRenderTemplates(t *testing.T) {
 	tests := []struct {
 		name       string
-		eventType  string
+		eventType  EventType
 		subject    string
 		body       string
 		metadata   map[string]string

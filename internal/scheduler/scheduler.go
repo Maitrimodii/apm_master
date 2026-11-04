@@ -190,7 +190,7 @@ func (s *Scheduler) executeSingleRun(ctx context.Context, task Task) {
 	}()
 
 	s.log.Debug("executing task", "task", name)
-	
+
 	// Create a sub-context for the execution, optional timeout could be added here
 	err = task.Execute(ctx)
 	if err != nil {
