@@ -44,4 +44,6 @@ jobs:
           go-version-file: go.mod
       - uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.1.6
+          # Must be built with a Go at least as new as go.mod's (1.25); v2.1.6 was
+          # built with Go 1.24 and refuses to run.
+          version: v2.15.0
