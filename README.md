@@ -5,7 +5,7 @@ through Kafka into TimescaleDB and serves the query, alerting, notification,
 auth and AI-investigation APIs. It is the source of truth for all platform
 data.
 
-Full documentation is in [`../docs/`](../docs/README.md): architecture, design
+Full documentation is in [`docs/`](docs/README.md): architecture, design
 and contracts, and operations and configuration.
 
 ## Quick start
