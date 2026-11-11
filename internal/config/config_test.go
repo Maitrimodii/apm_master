@@ -112,6 +112,27 @@ func TestValidateReportsEveryProblem(t *testing.T) {
 	}
 }
 
+func TestRefreshSessionMaxDays(t *testing.T) {
+	cfg, err := parse(validEnv())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Auth.RefreshSessionMaxTTL(); got != 30*24*time.Hour {
+		t.Errorf("RefreshSessionMaxTTL() default = %v, want 30 days", got)
+	}
+
+	env := validEnv()
+	env["REFRESH_TOKEN_EXPIRY_DAYS"] = "14"
+	env["REFRESH_SESSION_MAX_DAYS"] = "7"
+	cfg, err = parse(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "REFRESH_SESSION_MAX_DAYS") {
+		t.Fatalf("Validate() = %v, want a REFRESH_SESSION_MAX_DAYS error when it is shorter than a token", err)
+	}
+}
+
 func TestValidateRejectsPlaceholderTokenOutsideDevelopment(t *testing.T) {
 	env := validEnv()
 	env["APP_ENV"] = "production"

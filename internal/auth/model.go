@@ -32,8 +32,42 @@ type Invite struct {
 	TokenHash  string
 	ExpiresAt  time.Time
 	AcceptedAt *time.Time
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	// RevokedAt is set when an administrator cancels the invite.
+	RevokedAt *time.Time
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// InviteStatus is where an invite is in its lifecycle. It is derived from the
+// invite's timestamps, never stored.
+type InviteStatus string
+
+const (
+	InviteStatusPending  InviteStatus = "pending"
+	InviteStatusAccepted InviteStatus = "accepted"
+	InviteStatusRevoked  InviteStatus = "revoked"
+	InviteStatusExpired  InviteStatus = "expired"
+)
+
+// Status derives the invite's status. Accepted and revoked win over expired:
+// they are final, while expiry is only time passing.
+func (i Invite) Status(now time.Time) InviteStatus {
+	switch {
+	case i.AcceptedAt != nil:
+		return InviteStatusAccepted
+	case i.RevokedAt != nil:
+		return InviteStatusRevoked
+	case !i.ExpiresAt.After(now):
+		return InviteStatusExpired
+	default:
+		return InviteStatusPending
+	}
+}
+
+// RoleSummary names a role without its permissions.
+type RoleSummary struct {
+	ID   uuid.UUID `json:"id"`
+	Name string    `json:"name"`
 }
 
 type InviteRole struct {
@@ -79,6 +113,21 @@ type RefreshToken struct {
 	CreatedAt  time.Time
 	RevokedAt  *time.Time
 	UpdatedAt  time.Time
+	// FamilyID is shared by every token of one login session: rotation copies
+	// it from the parent token.
+	FamilyID uuid.UUID
+	// SessionExpiresAt is the session's absolute end. Nil on tokens created
+	// before sessions existed; see SessionEnd.
+	SessionExpiresAt *time.Time
+}
+
+// SessionEnd is when the token's session must end. Tokens without a session
+// expiry (created before it existed) end with the token itself.
+func (t RefreshToken) SessionEnd() time.Time {
+	if t.SessionExpiresAt != nil {
+		return *t.SessionExpiresAt
+	}
+	return t.ExpiresAt
 }
 
 type Role struct {

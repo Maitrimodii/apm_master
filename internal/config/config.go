@@ -120,12 +120,18 @@ type RedisConfig struct {
 	Timeout time.Duration `env:"REDIS_TIMEOUT_MS" envDefault:"5000"`
 }
 
+// AuthConfig holds token lifetimes. RefreshSessionMaxDays is the absolute
+// lifetime of a login session: refresh-token rotation never extends a session
+// past it. PasswordResetCooldownSecs is how long after one reset link another
+// request for the same account is ignored (0 disables the cooldown).
 type AuthConfig struct {
-	JWTSecret               string `env:"JWT_SECRET"`
-	AccessTokenExpiryMins   int    `env:"ACCESS_TOKEN_EXPIRY_MINS" envDefault:"15"`
-	RefreshTokenExpiryDays  int    `env:"REFRESH_TOKEN_EXPIRY_DAYS" envDefault:"7"`
-	InviteExpiryDays        int    `env:"INVITE_EXPIRY_DAYS" envDefault:"10"`
-	PasswordResetExpiryMins int    `env:"PASSWORD_RESET_EXPIRY_MINS" envDefault:"30"`
+	JWTSecret                 string `env:"JWT_SECRET"`
+	AccessTokenExpiryMins     int    `env:"ACCESS_TOKEN_EXPIRY_MINS" envDefault:"15"`
+	RefreshTokenExpiryDays    int    `env:"REFRESH_TOKEN_EXPIRY_DAYS" envDefault:"7"`
+	RefreshSessionMaxDays     int    `env:"REFRESH_SESSION_MAX_DAYS" envDefault:"30"`
+	InviteExpiryDays          int    `env:"INVITE_EXPIRY_DAYS" envDefault:"10"`
+	PasswordResetExpiryMins   int    `env:"PASSWORD_RESET_EXPIRY_MINS" envDefault:"30"`
+	PasswordResetCooldownSecs int    `env:"PASSWORD_RESET_COOLDOWN_SECS" envDefault:"60"`
 }
 
 func (c AuthConfig) AccessTokenTTL() time.Duration {
@@ -134,11 +140,17 @@ func (c AuthConfig) AccessTokenTTL() time.Duration {
 func (c AuthConfig) RefreshTokenTTL() time.Duration {
 	return time.Duration(c.RefreshTokenExpiryDays) * 24 * time.Hour
 }
+func (c AuthConfig) RefreshSessionMaxTTL() time.Duration {
+	return time.Duration(c.RefreshSessionMaxDays) * 24 * time.Hour
+}
 func (c AuthConfig) InviteTTL() time.Duration {
 	return time.Duration(c.InviteExpiryDays) * 24 * time.Hour
 }
 func (c AuthConfig) PasswordResetTTL() time.Duration {
 	return time.Duration(c.PasswordResetExpiryMins) * time.Minute
+}
+func (c AuthConfig) PasswordResetCooldown() time.Duration {
+	return time.Duration(c.PasswordResetCooldownSecs) * time.Second
 }
 
 type SMTPConfig struct {

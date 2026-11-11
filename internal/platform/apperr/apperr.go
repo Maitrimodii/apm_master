@@ -61,6 +61,7 @@ const (
 	CodeInviteAlreadyAccepted Code = "AUTH013"
 	CodeInviteExpired         Code = "AUTH014"
 	CodeRoleAlreadyExists     Code = "AUTH015"
+	CodeInviteRevoked         Code = "AUTH016"
 
 	// ingest
 	CodeInvalidPayload Code = "INGEST001"

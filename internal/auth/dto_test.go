@@ -72,3 +72,20 @@ func TestLoginRequestBindingDoesNotPanic(testRunner *testing.T) {
 		testRunner.Fatalf("org_slug = %q, want smoke", req.OrgSlug)
 	}
 }
+
+// GET /auth/invite carries the token in the query string. Binding must read
+// the lowercase ?token= parameter the invite email and the UI send.
+func TestGetInviteRequestBindsTokenFromQuery(testRunner *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/auth/invite?token=abc123", nil)
+
+	var req GetInviteRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		testRunner.Fatalf("ShouldBindQuery() error = %v", err)
+	}
+	if req.Token != "abc123" {
+		testRunner.Fatalf("token = %q, want abc123", req.Token)
+	}
+}

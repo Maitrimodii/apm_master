@@ -62,6 +62,9 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 
 	protected.GET("/me", h.Me)
 	protected.POST("/invite", can(authz.Invites, authz.Write), h.CreateInvite)
+	protected.GET("/invites", can(authz.Invites, authz.Read), h.ListInvites)
+	protected.POST("/invites/:id/resend", can(authz.Invites, authz.Write), h.ResendInvite)
+	protected.DELETE("/invites/:id", can(authz.Invites, authz.Delete), h.CancelInvite)
 	protected.GET("/permissions", can(authz.Permissions, authz.Read), h.GetPermissions)
 	protected.POST("/roles", can(authz.Roles, authz.Write), h.CreateRole)
 	protected.GET("/roles", can(authz.Roles, authz.Read), h.GetRoles)

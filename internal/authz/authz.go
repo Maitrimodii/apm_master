@@ -53,6 +53,7 @@ type Permission struct {
 var Catalogue = []Permission{
 	{Invites, Write, "Invite users to the organization"},
 	{Invites, Read, "View organization invites"},
+	{Invites, Delete, "Cancel pending invites"},
 	{Permissions, Read, "View permissions"},
 	{Permissions, Write, "Create permissions"},
 	{Permissions, Update, "Update permissions"},

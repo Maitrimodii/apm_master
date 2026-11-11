@@ -62,6 +62,12 @@ func (h *Handler) CreateRole(
 	}
 
 	req.OrgID = orgID
+	userID, apiErr := httpx.UserID(c)
+	if apiErr != nil {
+		httpx.Handle(c, apiErr)
+		return
+	}
+	req.UserID = userID
 
 	resp, err := h.access.CreateRole(
 		c.Request.Context(),
@@ -224,6 +230,12 @@ func (h *Handler) UpdateRole(
 
 	req.RoleID = roleID
 	req.OrgID = orgID
+	userID, apiErr := httpx.UserID(c)
+	if apiErr != nil {
+		httpx.Handle(c, apiErr)
+		return
+	}
+	req.UserID = userID
 
 	resp, err := h.access.UpdateRole(
 		c.Request.Context(),

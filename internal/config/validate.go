@@ -95,8 +95,11 @@ func (c AuthConfig) validate(errs *check) {
 	errs.require(len(c.JWTSecret) >= minJWTSecretLength, "JWT_SECRET must be at least %d characters, got %d", minJWTSecretLength, len(c.JWTSecret))
 	errs.positive("ACCESS_TOKEN_EXPIRY_MINS", int64(c.AccessTokenExpiryMins))
 	errs.positive("REFRESH_TOKEN_EXPIRY_DAYS", int64(c.RefreshTokenExpiryDays))
+	errs.require(c.RefreshSessionMaxDays >= c.RefreshTokenExpiryDays,
+		"REFRESH_SESSION_MAX_DAYS (%d) must be at least REFRESH_TOKEN_EXPIRY_DAYS (%d)", c.RefreshSessionMaxDays, c.RefreshTokenExpiryDays)
 	errs.positive("INVITE_EXPIRY_DAYS", int64(c.InviteExpiryDays))
 	errs.positive("PASSWORD_RESET_EXPIRY_MINS", int64(c.PasswordResetExpiryMins))
+	errs.require(c.PasswordResetCooldownSecs >= 0, "PASSWORD_RESET_COOLDOWN_SECS must not be negative")
 }
 
 func (c SMTPConfig) validate(errs *check) {

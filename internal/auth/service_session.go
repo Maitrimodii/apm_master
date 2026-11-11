@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -26,16 +25,27 @@ type Claims struct {
 // SessionService issues, refreshes, revokes and verifies JWT sessions. It
 // implements middleware.TokenParser.
 type SessionService struct {
-	repo *Repository
-	cfg  *config.Config
-	log  *slog.Logger
+	repo   *Repository
+	cfg    *config.Config
+	issuer *sessionIssuer
+	log    *slog.Logger
 }
 
 func NewSessionService(repo *Repository, cfg *config.Config, log *slog.Logger) *SessionService {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &SessionService{repo: repo, cfg: cfg, log: log}
+	return &SessionService{repo: repo, cfg: cfg, issuer: newSessionIssuer(repo, cfg), log: log}
+}
+
+// Refresh-token rejections. The codes and message match what the endpoint
+// returned before session families existed, so clients see no change.
+func errInvalidRefreshToken() *apperr.Error {
+	return apperr.Unauthorized(apperr.CodeInvalidToken, "invalid refresh token")
+}
+
+func errUnusableRefreshToken() *apperr.Error {
+	return apperr.Unauthorized(apperr.CodeTokenExpired, "invalid refresh token")
 }
 
 func (s *SessionService) ParseToken(
@@ -145,193 +155,119 @@ func (s *SessionService) Login(
 		)
 	}
 
-	accessToken, err := GenerateAccessToken(*user, s.cfg.Auth.AccessTokenTTL(), s.cfg.Auth.JWTSecret)
-	if err != nil {
-		return nil, apperr.Internal(err)
-	}
-
-	refreshToken, err := GenerateToken()
-
-	if err != nil {
-		return nil, apperr.Internal(err)
-	}
-
-	hashedRefreshToken := HashToken(refreshToken)
-
-	var ipAddress *net.IP
-
-	if input.IPAddress != nil {
-		parsedIP := net.ParseIP(
-			*input.IPAddress,
-		)
-
-		if parsedIP != nil {
-			ipAddress = &parsedIP
-		}
-	}
-
-	refreshTokenModel := RefreshToken{
-		UserID:    user.ID,
-		TokenHash: hashedRefreshToken,
-		UserAgent: input.UserAgent,
-		IPAddress: ipAddress,
-		ExpiresAt: time.Now().Add(
-			s.cfg.Auth.RefreshTokenTTL(),
-		),
-	}
-
-	_, err = s.repo.CreateRefreshToken(
-		ctx,
-		s.repo.Query(),
-		refreshTokenModel,
-	)
+	resp, err := s.issuer.issue(ctx, s.repo.Query(), *user, clientInfo{UserAgent: input.UserAgent, IPAddress: input.IPAddress}, nil)
 	if err != nil {
 		return nil, apperr.Internal(err)
 	}
 
 	s.log.Info("user logged in", "org_id", org.ID, "user_id", user.ID)
 
-	return &LoginResponse{
-		User:         NewUserResponse(*user),
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-	}, nil
+	return resp, nil
 }
 
+// RefreshToken rotates a refresh token: the presented token is consumed and a
+// new one in the same session is issued along with a new access token.
+//
+// Rotation runs in one transaction that locks the user row (shared) and then
+// consumes the token with a conditional UPDATE, so of concurrent requests
+// presenting the same token exactly one rotates it. The new access token is
+// signed and the new refresh token inserted inside that transaction, and the
+// pair is returned only after commit: if any step fails the transaction rolls
+// back and the presented token stays usable.
+//
+// A token that cannot be consumed is rejected without rotating anything:
+//   - unknown: AUTH003
+//   - expired: AUTH004; expiry is the normal end of a token, so its session
+//     is left alone
+//   - already revoked: AUTH004, and the whole session is revoked. A rotated
+//     token being presented again means it was copied (or two clients raced
+//     with one token), so the session can no longer be trusted.
 func (s *SessionService) RefreshToken(
 	ctx context.Context,
 	input RefreshTokenRequest,
 ) (*LoginResponse, error) {
+	tokenHash := HashToken(input.RefreshToken)
 
-	hashedToken := HashToken(
-		input.RefreshToken,
-	)
-
-	refreshToken, err := s.repo.GetRefreshTokenByHash(
-		ctx,
-		s.repo.Query(),
-		hashedToken,
-	)
+	// Find the owner first so the transaction can lock the user row before
+	// the token row (the lock order every auth transaction follows; see
+	// Repository.LockUser). This read decides nothing on its own.
+	presented, err := s.repo.GetRefreshTokenByHash(ctx, s.repo.Query(), tokenHash)
 	if err != nil {
 		return nil, apperr.Internal(err)
 	}
-
-	if refreshToken == nil {
-		return nil, apperr.Unauthorized(
-			apperr.CodeInvalidToken,
-			"invalid refresh token",
-		)
+	if presented == nil {
+		return nil, errInvalidRefreshToken()
 	}
 
-	if refreshToken.RevokedAt != nil ||
-		refreshToken.ExpiresAt.Before(
-			time.Now(),
-		) {
-
-		return nil, apperr.Unauthorized(
-			apperr.CodeTokenExpired,
-			"invalid refresh token",
-		)
-	}
-
-	user, err := s.repo.GetUserByID(
-		ctx,
-		s.repo.Query(),
-		refreshToken.UserID,
+	var (
+		resp      *LoginResponse
+		rejection *apperr.Error
+		parentID  = presented.ID
 	)
-	if err != nil {
-		return nil, apperr.Internal(err)
-	}
-
-	if user == nil {
-		return nil, apperr.Unauthorized(
-			apperr.CodeInvalidToken,
-			"invalid refresh token",
-		)
-	}
-
-	accessToken, err := GenerateAccessToken(
-		*user,
-		s.cfg.Auth.AccessTokenTTL(),
-		s.cfg.Auth.JWTSecret,
-	)
-	if err != nil {
-		return nil, apperr.Internal(err)
-	}
-
-	newRefreshToken, err := GenerateToken()
-	if err != nil {
-		return nil, apperr.Internal(err)
-	}
-
-	hashedNewRefreshToken := HashToken(
-		newRefreshToken,
-	)
-
-	err = s.repo.WithTx(
-		ctx,
-		func(querier Querier) error {
-
-			err := s.repo.RevokeRefreshToken(
-				ctx,
-				querier,
-				refreshToken.ID,
-			)
-			if err != nil {
-				return err
-			}
-
-			var ipAddress *net.IP
-
-			if input.IPAddress != nil {
-				parsedIP := net.ParseIP(
-					*input.IPAddress,
-				)
-
-				if parsedIP != nil {
-					ipAddress = &parsedIP
-				}
-			}
-
-			_, err = s.repo.CreateRefreshToken(
-				ctx,
-				querier,
-				RefreshToken{
-					UserID: user.ID,
-
-					TokenHash: hashedNewRefreshToken,
-
-					UserAgent:  input.UserAgent,
-					IPAddress:  ipAddress,
-					DeviceName: refreshToken.DeviceName,
-
-					ExpiresAt: time.Now().Add(
-						s.cfg.Auth.RefreshTokenTTL(),
-					),
-				},
-			)
-
-			if err != nil {
-				return err
-			}
-
+	err = s.repo.WithTx(ctx, func(querier Querier) error {
+		user, err := s.repo.LockUser(ctx, querier, presented.UserID, lockUserShared)
+		if err != nil {
+			return err
+		}
+		if user == nil {
+			rejection = errInvalidRefreshToken()
 			return nil
-		},
-	)
+		}
 
+		parent, err := s.repo.ConsumeRefreshToken(ctx, querier, tokenHash)
+		if err != nil {
+			return err
+		}
+		if parent == nil {
+			// Returning nil (not an error) commits any session revocation
+			// rejectUnusableToken made.
+			rejection, err = s.rejectUnusableToken(ctx, querier, tokenHash)
+			return err
+		}
+
+		resp, err = s.issuer.issue(ctx, querier, *user, clientInfo{UserAgent: input.UserAgent, IPAddress: input.IPAddress}, parent)
+		return err
+	})
 	if err != nil {
 		return nil, apperr.Internal(err)
 	}
+	if rejection != nil {
+		return nil, rejection
+	}
 
-	s.log.Info("refresh token rotated", "user_id", user.ID, "refresh_token_id", refreshToken.ID)
+	s.log.Info("refresh token rotated", "user_id", presented.UserID, "family_id", presented.FamilyID, "refresh_token_id", parentID)
+	return resp, nil
+}
 
-	return &LoginResponse{
-		User: NewUserResponse(
-			*user,
-		),
-		AccessToken:  accessToken,
-		RefreshToken: newRefreshToken,
-	}, nil
+// rejectUnusableToken explains why ConsumeRefreshToken matched nothing and
+// applies the reuse policy. It runs in the rotation transaction, after the
+// consume, so it sees the token as any concurrent rotation committed it.
+func (s *SessionService) rejectUnusableToken(ctx context.Context, querier Querier, tokenHash string) (*apperr.Error, error) {
+	token, err := s.repo.GetRefreshTokenByHash(ctx, querier, tokenHash)
+	if err != nil {
+		return nil, err
+	}
+
+	switch {
+	case token == nil:
+		return errInvalidRefreshToken(), nil
+
+	// Expiry is checked before revocation so an expired token, rotated or
+	// not, never counts as reuse. A token that is neither revoked nor expired
+	// by this clock missed the consume by a hair of clock difference with the
+	// database: treat it as expired too.
+	case !token.ExpiresAt.After(time.Now()) || token.RevokedAt == nil:
+		return errUnusableRefreshToken(), nil
+
+	default:
+		revoked, err := s.repo.RevokeRefreshTokenFamily(ctx, querier, token.FamilyID)
+		if err != nil {
+			return nil, err
+		}
+		s.log.WarnContext(ctx, "revoked refresh token presented, session revoked",
+			"user_id", token.UserID, "family_id", token.FamilyID, "refresh_token_id", token.ID, "revoked_tokens", revoked)
+		return errUnusableRefreshToken(), nil
+	}
 }
 
 func (s *SessionService) Logout(

@@ -241,15 +241,20 @@ func (r *Repository) CreateRefreshToken(ctx context.Context, querier Querier, to
 		user_agent,
 		ip_address,
 		device_name,
-		expires_at
+		expires_at,
+		family_id,
+		session_expires_at
 	)
-	VALUES ($1, $2, $3, $4, $5, $6)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	RETURNING
 		id,
 		created_at,
 		updated_at
 	`
-	err := querier.QueryRow(ctx, query, token.UserID, token.TokenHash, token.UserAgent, token.IPAddress, token.DeviceName, token.ExpiresAt).Scan(&token.ID, &token.CreatedAt, &token.UpdatedAt)
+	err := querier.QueryRow(ctx, query,
+		token.UserID, token.TokenHash, token.UserAgent, token.IPAddress, token.DeviceName, token.ExpiresAt,
+		token.FamilyID, token.SessionExpiresAt,
+	).Scan(&token.ID, &token.CreatedAt, &token.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"create refresh token: %w",
@@ -259,10 +264,14 @@ func (r *Repository) CreateRefreshToken(ctx context.Context, querier Querier, to
 	return &token, nil
 }
 
-func (r *Repository) GetRefreshTokenByHash(ctx context.Context, querier Querier, tokenHash string) (*RefreshToken, error) {
-	query := `SELECT id, user_id, token_hash, user_agent, ip_address, device_name, expires_at, last_used_at, created_at, revoked_at, updated_at FROM refresh_tokens WHERE token_hash = $1`
+// refreshTokenColumns is the column list scanRefreshToken reads, in order.
+const refreshTokenColumns = `id, user_id, token_hash, user_agent, ip_address, device_name, expires_at,
+	last_used_at, created_at, revoked_at, updated_at, family_id, session_expires_at`
+
+// scanRefreshToken scans one refreshTokenColumns row; no row is (nil, nil).
+func scanRefreshToken(row pgx.Row) (*RefreshToken, error) {
 	var token RefreshToken
-	err := querier.QueryRow(ctx, query, tokenHash).Scan(
+	err := row.Scan(
 		&token.ID,
 		&token.UserID,
 		&token.TokenHash,
@@ -274,17 +283,74 @@ func (r *Repository) GetRefreshTokenByHash(ctx context.Context, querier Querier,
 		&token.CreatedAt,
 		&token.RevokedAt,
 		&token.UpdatedAt,
+		&token.FamilyID,
+		&token.SessionExpiresAt,
 	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf(
-			"get refresh token by hash: %w",
-			err,
-		)
+		return nil, err
 	}
 	return &token, nil
+}
+
+func (r *Repository) GetRefreshTokenByHash(ctx context.Context, querier Querier, tokenHash string) (*RefreshToken, error) {
+	query := `SELECT ` + refreshTokenColumns + ` FROM refresh_tokens WHERE token_hash = $1`
+	token, err := scanRefreshToken(querier.QueryRow(ctx, query, tokenHash))
+	if err != nil {
+		return nil, fmt.Errorf("get refresh token by hash: %w", err)
+	}
+	return token, nil
+}
+
+// ConsumeRefreshToken revokes the token with tokenHash if it is still active
+// (not revoked, not expired) and returns it; otherwise it returns nil.
+//
+// It is a single conditional UPDATE, so of several transactions consuming the
+// same token exactly one gets the row: the others block on its row lock and,
+// once it commits, re-check the WHERE clause against the revoked row and match
+// nothing. If the winner rolls back instead, the token stays active and the
+// next waiter consumes it.
+func (r *Repository) ConsumeRefreshToken(ctx context.Context, querier Querier, tokenHash string) (*RefreshToken, error) {
+	query := `
+		UPDATE refresh_tokens
+		SET revoked_at = now(), last_used_at = now(), updated_at = now()
+		WHERE token_hash = $1
+		  AND revoked_at IS NULL
+		  AND expires_at > now()
+		RETURNING ` + refreshTokenColumns
+	token, err := scanRefreshToken(querier.QueryRow(ctx, query, tokenHash))
+	if err != nil {
+		return nil, fmt.Errorf("consume refresh token: %w", err)
+	}
+	return token, nil
+}
+
+// RevokeRefreshTokenFamily revokes every active token of one session and
+// returns how many it revoked.
+func (r *Repository) RevokeRefreshTokenFamily(ctx context.Context, querier Querier, familyID uuid.UUID) (int64, error) {
+	tag, err := querier.Exec(ctx, `
+		UPDATE refresh_tokens
+		SET revoked_at = now(), updated_at = now()
+		WHERE family_id = $1 AND revoked_at IS NULL`, familyID)
+	if err != nil {
+		return 0, fmt.Errorf("revoke refresh token family: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// RevokeUserRefreshTokens revokes every active token of a user, ending all of
+// their sessions, and returns how many it revoked.
+func (r *Repository) RevokeUserRefreshTokens(ctx context.Context, querier Querier, userID uuid.UUID) (int64, error) {
+	tag, err := querier.Exec(ctx, `
+		UPDATE refresh_tokens
+		SET revoked_at = now(), updated_at = now()
+		WHERE user_id = $1 AND revoked_at IS NULL`, userID)
+	if err != nil {
+		return 0, fmt.Errorf("revoke user refresh tokens: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (r *Repository) RevokeRefreshToken(ctx context.Context, querier Querier, tokenID uuid.UUID) error {

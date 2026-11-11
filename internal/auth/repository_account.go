@@ -108,6 +108,50 @@ func (r *Repository) GetUserByID(ctx context.Context, querier Querier, userID uu
 	return &user, nil
 }
 
+// userLock is the row lock LockUser takes.
+type userLock string
+
+const (
+	// lockUserShared lets other shared holders through but waits for, and
+	// blocks, an exclusive holder. Refresh-token rotation takes it.
+	lockUserShared userLock = "FOR SHARE"
+	// lockUserExclusive serializes against every other lock on the user.
+	// Password-reset requests and resets take it.
+	lockUserExclusive userLock = "FOR UPDATE"
+)
+
+// LockUser loads a user and locks their row until the transaction ends. It
+// must run inside a transaction; no row is (nil, nil).
+//
+// Auth transactions that touch a user's sessions or reset tokens lock the user
+// row first and token rows second. That fixed order rules out deadlocks, and
+// it makes a password reset wait for an in-flight refresh to commit (so the
+// reset sees and revokes the new token) or the refresh wait for the reset (so
+// it finds its token already revoked).
+func (r *Repository) LockUser(ctx context.Context, querier Querier, userID uuid.UUID, lock userLock) (*User, error) {
+	query := `SELECT id, org_id, is_email_verified, first_name, last_name, email, password_hash, created_at, updated_at
+		FROM users WHERE id = $1 ` + string(lock)
+	var user User
+	err := querier.QueryRow(ctx, query, userID).Scan(
+		&user.ID,
+		&user.OrgID,
+		&user.IsEmailVerified,
+		&user.FirstName,
+		&user.LastName,
+		&user.Email,
+		&user.PasswordHash,
+		&user.CreatedAt,
+		&user.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock user: %w", err)
+	}
+	return &user, nil
+}
+
 func (r *Repository) UpdateUserPassword(ctx context.Context, querier Querier, userID uuid.UUID, passwordHash string) error {
 	query := `UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2`
 	_, err := querier.Exec(ctx, query, passwordHash, userID)

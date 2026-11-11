@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"golang.org/x/crypto/bcrypt"
 
 	"github.com/Maitrimodii/apm_master/internal/authz"
 	"github.com/Maitrimodii/apm_master/internal/config"
@@ -51,17 +50,9 @@ func (s *AccountService) RegisterOrgOwner(
 		)
 	}
 
-	hashedPassword, err := bcrypt.GenerateFromPassword(
-		[]byte(input.Password),
-		bcrypt.DefaultCost,
-	)
+	passwordHash, err := hashPassword(input.Password)
 	if err != nil {
-		return nil, apperr.Internal(
-			fmt.Errorf(
-				"hash password: %w",
-				err,
-			),
-		)
+		return nil, err
 	}
 
 	var createdOrg *Org
@@ -99,10 +90,6 @@ func (s *AccountService) RegisterOrgOwner(
 			if err := s.seedAdminPermissions(ctx, querier, role.ID); err != nil {
 				return err
 			}
-
-			passwordHash := string(
-				hashedPassword,
-			)
 
 			user, err := s.repo.CreateUser(
 				ctx,
@@ -207,13 +194,48 @@ func (s *AccountService) ForgotPassword(
 		return nil, apperr.Internal(err)
 	}
 
-	_, err = s.repo.CreatePasswordResetToken(ctx, s.repo.Query(), PasswordResetToken{
-		UserID:    user.ID,
-		TokenHash: HashToken(rawToken),
-		ExpiresAt: time.Now().Add(s.cfg.Auth.PasswordResetTTL()),
+	// Only the newest reset link may work. Locking the user row serializes
+	// concurrent requests for the same user, so each one retires every token
+	// the previous ones committed and exactly one token is left usable.
+	//
+	// Within the cooldown of the last link, a request is accepted (same
+	// response) but changes nothing: no new link, no email, and the existing
+	// link stays valid. Otherwise repeated requests could flood the inbox and
+	// keep invalidating the link the user is about to click.
+	skip := false
+	err = s.repo.WithTx(ctx, func(querier Querier) error {
+		locked, err := s.repo.LockUser(ctx, querier, user.ID, lockUserExclusive)
+		if err != nil {
+			return err
+		}
+		if locked == nil {
+			skip = true
+			return nil
+		}
+		recent, err := s.repo.RecentPasswordResetExists(ctx, querier, user.ID, s.cfg.Auth.PasswordResetCooldown())
+		if err != nil {
+			return err
+		}
+		if recent {
+			skip = true
+			return nil
+		}
+		if err := s.repo.InvalidateUserPasswordResetTokens(ctx, querier, user.ID); err != nil {
+			return err
+		}
+		_, err = s.repo.CreatePasswordResetToken(ctx, querier, PasswordResetToken{
+			UserID:    user.ID,
+			TokenHash: HashToken(rawToken),
+			ExpiresAt: time.Now().Add(s.cfg.Auth.PasswordResetTTL()),
+		})
+		return err
 	})
 	if err != nil {
 		return nil, apperr.Internal(err)
+	}
+	if skip {
+		s.log.Info("password reset request throttled or user gone", "org_id", org.ID, "user_id", user.ID)
+		return response, nil
 	}
 
 	if s.notification != nil {
@@ -241,42 +263,78 @@ func (s *AccountService) ForgotPassword(
 	return response, nil
 }
 
+func errPasswordResetTokenUnusable() *apperr.Error {
+	return apperr.BadRequest(apperr.CodeTokenExpired, "password reset token has expired")
+}
+
+// ResetPassword sets a new password with a reset token and ends every session
+// the user had.
+//
+// The early lookup only rejects bad tokens cheaply, before spending a bcrypt
+// hash on them. The decision is made in the transaction: it locks the user
+// row, consumes the token with a conditional UPDATE (so of concurrent requests
+// with one token exactly one gets it), sets the password, revokes every
+// refresh token of the user and retires their other reset links. Any failure
+// rolls all of it back, leaving the token usable.
 func (s *AccountService) ResetPassword(
 	ctx context.Context,
 	input ResetPasswordRequest,
 ) (*ResetPasswordResponse, error) {
-	resetToken, err := s.repo.GetPasswordResetTokenByHash(ctx, s.repo.Query(), HashToken(input.Token))
+	tokenHash := HashToken(input.Token)
+	resetToken, err := s.repo.GetPasswordResetTokenByHash(ctx, s.repo.Query(), tokenHash)
 	if err != nil {
 		return nil, apperr.Internal(err)
 	}
 	if resetToken == nil {
-		s.log.WarnContext(ctx, "failed password reset attempt: invalid token", "token_hash", HashToken(input.Token))
+		s.log.WarnContext(ctx, "failed password reset attempt: invalid token", "token_hash", tokenHash)
 		return nil, apperr.BadRequest(apperr.CodeInvalidToken, "invalid password reset token")
 	}
 	if resetToken.UsedAt != nil || resetToken.ExpiresAt.Before(time.Now()) {
 		s.log.WarnContext(ctx, "failed password reset attempt: token expired or already used", "user_id", resetToken.UserID, "token_id", resetToken.ID)
-		return nil, apperr.BadRequest(apperr.CodeTokenExpired, "password reset token has expired")
+		return nil, errPasswordResetTokenUnusable()
 	}
 
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+	hashedPassword, err := hashPassword(input.Password)
 	if err != nil {
-		return nil, apperr.Internal(fmt.Errorf("hash password: %w", err))
+		return nil, err
 	}
 
+	var (
+		rejected       bool
+		revokedSession int64
+	)
 	err = s.repo.WithTx(ctx, func(querier Querier) error {
-		if err := s.repo.UpdateUserPassword(ctx, querier, resetToken.UserID, string(hashedPassword)); err != nil {
+		user, err := s.repo.LockUser(ctx, querier, resetToken.UserID, lockUserExclusive)
+		if err != nil {
 			return err
 		}
-		if err := s.repo.MarkPasswordResetTokenUsed(ctx, querier, resetToken.ID); err != nil {
+		consumed, err := s.repo.ConsumePasswordResetToken(ctx, querier, tokenHash)
+		if err != nil {
 			return err
 		}
-		return nil
+		if user == nil || consumed == nil {
+			// Used by a concurrent request, expired since the lookup, or the
+			// user is gone. Nothing was written.
+			rejected = true
+			return nil
+		}
+		if err := s.repo.UpdateUserPassword(ctx, querier, consumed.UserID, hashedPassword); err != nil {
+			return err
+		}
+		if revokedSession, err = s.repo.RevokeUserRefreshTokens(ctx, querier, consumed.UserID); err != nil {
+			return err
+		}
+		return s.repo.InvalidateUserPasswordResetTokens(ctx, querier, consumed.UserID)
 	})
 	if err != nil {
 		return nil, apperr.Internal(err)
 	}
+	if rejected {
+		s.log.WarnContext(ctx, "failed password reset attempt: token consumed concurrently or expired", "user_id", resetToken.UserID, "token_id", resetToken.ID)
+		return nil, errPasswordResetTokenUnusable()
+	}
 
-	s.log.Info("password reset completed", "user_id", resetToken.UserID)
+	s.log.Info("password reset completed", "user_id", resetToken.UserID, "revoked_refresh_tokens", revokedSession)
 	return &ResetPasswordResponse{Message: "Password reset successfully"}, nil
 }
 
@@ -303,9 +361,17 @@ func (s *AccountService) Me(
 		)
 	}
 
+	permissions, err := s.repo.GetUserPermissions(ctx, s.repo.Query(), input.UserID, input.OrgID)
+	if err != nil {
+		return nil, apperr.Internal(err)
+	}
+	grants := make([]PermissionGrant, 0, len(permissions))
+	for _, p := range permissions {
+		grants = append(grants, PermissionGrant{Name: p.Name, Action: p.Action})
+	}
+
 	return &MeResponse{
-		User: NewUserResponse(
-			*user,
-		),
+		User:        NewUserResponse(*user),
+		Permissions: grants,
 	}, nil
 }
