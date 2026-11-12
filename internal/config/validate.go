@@ -3,8 +3,12 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"slices"
 	"strings"
+
+	"github.com/Maitrimodii/apm_master/internal/platform/secretbox"
 )
 
 var (
@@ -35,9 +39,10 @@ func (c *Config) Validate() error {
 	c.App.validate(&errs)
 	c.HTTP.validate(&errs)
 	c.Postgres.validate(&errs)
-	c.Redis.validate(&errs)
+	c.Redis.validate(&errs, c.App.IsDevelopment())
 	c.Auth.validate(&errs)
-	c.SMTP.validate(&errs)
+	c.SMTP.validate(&errs, c.App.IsDevelopment())
+	c.Notify.validate(&errs)
 	c.Kafka.validate(&errs)
 	c.Alerting.validate(&errs)
 	c.AI.validate(&errs, c.App.IsDevelopment())
@@ -50,7 +55,8 @@ func (c *Config) ValidateScheduler() error {
 	c.App.validate(&errs)
 	errs.require(c.App.Mode.RunsScheduler(), "APP_MODE must be scheduler or all, got %q", c.App.Mode)
 	c.Postgres.validate(&errs)
-	c.SMTP.validate(&errs)
+	c.SMTP.validate(&errs, c.App.IsDevelopment())
+	c.Notify.validate(&errs)
 	c.Alerting.validate(&errs)
 	return errors.Join(errs...)
 }
@@ -70,6 +76,19 @@ func (c HTTPConfig) validate(errs *check) {
 	errs.positive("MAX_BODY_BYTES", c.MaxBodyBytes)
 	errs.positive("RATE_LIMIT_BURST", int64(c.RateLimitBurst))
 	errs.positive("RATE_LIMIT_WINDOW_MS", int64(c.RateLimitWindow))
+	for _, proxy := range c.TrustedProxies {
+		if !validProxyAddress(proxy) {
+			errs.require(false, "TRUSTED_PROXIES entry %q must be an IP address or CIDR (e.g. 10.0.0.5 or 10.0.0.0/24)", proxy)
+		}
+	}
+}
+
+func validProxyAddress(s string) bool {
+	s = strings.TrimSpace(s)
+	if _, _, err := net.ParseCIDR(s); err == nil {
+		return true
+	}
+	return net.ParseIP(s) != nil
 }
 
 func (c PostgresConfig) validate(errs *check) {
@@ -86,9 +105,35 @@ func (c PostgresConfig) validate(errs *check) {
 	errs.positive("POSTGRES_MAX_CONN_LIFETIME_MS", int64(c.MaxConnLifetime))
 }
 
-func (c RedisConfig) validate(errs *check) {
+// minRedisPasswordLength is the shortest Redis password accepted outside
+// development.
+const minRedisPasswordLength = 16
+
+func (c RedisConfig) validate(errs *check, development bool) {
 	errs.set("REDIS_URL", c.URL)
 	errs.positive("REDIS_TIMEOUT_MS", int64(c.Timeout))
+	if development {
+		return // a loopback-only development Redis may run without a password
+	}
+	password := redisPassword(c.URL)
+	errs.require(password != "",
+		"REDIS_URL must include a password outside development (redis://:<password>@host:6379/0); Redis without authentication is only allowed when APP_ENV=development")
+	errs.require(password == "" || len(password) >= minRedisPasswordLength,
+		"the Redis password in REDIS_URL must be at least %d characters", minRedisPasswordLength)
+}
+
+// redisPassword extracts the password from a redis:// or rediss:// URL; a
+// bare host:port has none. It never returns anything else from the URL.
+func redisPassword(raw string) string {
+	if !strings.Contains(raw, "://") {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return ""
+	}
+	password, _ := u.User.Password()
+	return password
 }
 
 func (c AuthConfig) validate(errs *check) {
@@ -100,12 +145,35 @@ func (c AuthConfig) validate(errs *check) {
 	errs.positive("INVITE_EXPIRY_DAYS", int64(c.InviteExpiryDays))
 	errs.positive("PASSWORD_RESET_EXPIRY_MINS", int64(c.PasswordResetExpiryMins))
 	errs.require(c.PasswordResetCooldownSecs >= 0, "PASSWORD_RESET_COOLDOWN_SECS must not be negative")
+	errs.require(c.InviteResendCooldownSecs >= 0, "INVITE_RESEND_COOLDOWN_SECS must not be negative")
 }
 
-func (c SMTPConfig) validate(errs *check) {
+func (c SMTPConfig) validate(errs *check, development bool) {
 	errs.set("EMAIL_FROM", c.From)
 	errs.set("SMTP_HOST", c.Host)
 	errs.set("SMTP_PORT", c.Port)
+	errs.require(development || !c.AllowInsecure,
+		"SMTP_ALLOW_INSECURE=true is only allowed when APP_ENV=development (for a local mail catcher); production mail must use STARTTLS")
+	errs.require((c.Username == "") == (c.Password == ""), "SMTP_USERNAME and SMTP_PASSWORD must be set together")
+	errs.require(development || c.Username != "" || c.TrustedRelay,
+		"outside development, set SMTP_USERNAME and SMTP_PASSWORD, or SMTP_TRUSTED_RELAY=true if the relay accepts mail from this network without credentials")
+}
+
+const minStaleProcessingMinutes = 2
+
+// validate requires valid encryption keys in every environment: sensitive
+// emails are never queued in plaintext, so a process without keys cannot send
+// invites or password resets.
+func (c NotificationConfig) validate(errs *check) {
+	if _, err := secretbox.ParseKeyring(c.EncryptionKeys, c.EncryptionKeyID); err != nil {
+		errs.require(false, "NOTIFICATION_ENCRYPTION_KEYS / NOTIFICATION_ENCRYPTION_KEY_ID: %v "+
+			"(set NOTIFICATION_ENCRYPTION_KEYS=<id>:<key from `openssl rand -base64 32`> and NOTIFICATION_ENCRYPTION_KEY_ID=<id>)", err)
+	}
+	errs.positive("NOTIFICATION_DEAD_LETTER_RECOVERY_HOURS", int64(c.DeadLetterRecoveryHours))
+	// A job is processed for at most 30 seconds; 2 minutes leaves a wide
+	// margin so a job still in flight is never requeued.
+	errs.require(c.StaleProcessingMinutes >= minStaleProcessingMinutes,
+		"NOTIFICATION_STALE_PROCESSING_MINUTES must be at least %d", minStaleProcessingMinutes)
 }
 
 func (c KafkaConfig) validate(errs *check) {

@@ -43,8 +43,8 @@ migrate-status: ## Show migration version
 run: ## Run the API locally
 	$(GO) run ./cmd/apm
 
-deps-up: ## Start Postgres, Redis and Kafka in Docker
-	docker compose -f deploy/docker/docker-compose.yml up -d postgres redis kafka
+deps-up: ## Start Postgres, Redis, Kafka and the Mailpit mail catcher in Docker
+	docker compose -f deploy/docker/docker-compose.yml up -d postgres redis kafka mailpit
 
 deps-down: ## Stop the Docker dependencies
 	docker compose -f deploy/docker/docker-compose.yml down

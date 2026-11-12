@@ -26,7 +26,18 @@ type SMTPConfig struct {
 	Username string
 	Password string
 	From     string
+	// AllowInsecure permits sending without TLS when the server does not offer
+	// STARTTLS. Configuration only allows it in development (a local mail
+	// catcher); otherwise a server without STARTTLS is refused.
+	AllowInsecure bool
 }
+
+// errNoSTARTTLS is returned when the server does not offer TLS and plaintext
+// is not allowed. Emails can carry one-time links: they are never sent where
+// anyone on the network path could read them, and a downgrade (STARTTLS
+// stripped by an attacker) fails instead of silently going plaintext.
+var errNoSTARTTLS = errors.New("smtp server does not offer STARTTLS; refusing to send in plaintext " +
+	"(set SMTP_ALLOW_INSECURE=true only for a local development mail catcher)")
 
 // SMTPProvider delivers email over SMTP, upgrading to TLS when offered.
 type SMTPProvider struct {
@@ -79,6 +90,8 @@ func (p *SMTPProvider) Send(ctx context.Context, msg Message) error {
 		if err := client.StartTLS(&tls.Config{ServerName: p.cfg.Host, MinVersion: tls.VersionTLS12}); err != nil {
 			return fmt.Errorf("smtp starttls: %w", err)
 		}
+	} else if !p.cfg.AllowInsecure {
+		return errNoSTARTTLS
 	}
 	if p.cfg.Username != "" || p.cfg.Password != "" {
 		if err := client.Auth(smtp.PlainAuth("", p.cfg.Username, p.cfg.Password, p.cfg.Host)); err != nil {

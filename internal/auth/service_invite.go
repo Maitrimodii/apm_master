@@ -2,11 +2,14 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Maitrimodii/apm_master/internal/config"
 	"github.com/Maitrimodii/apm_master/internal/notification"
@@ -50,6 +53,7 @@ func (s *InviteService) CreateInvite(ctx context.Context, input InviteUserReques
 	if len(roleIDs) == 0 {
 		return nil, apperr.ValidationError("role_ids", "at least one role is required")
 	}
+	input.Email = normalizeEmail(input.Email)
 	rawToken, err := s.newToken()
 	if err != nil {
 		return nil, apperr.Internal(err)
@@ -69,18 +73,22 @@ func (s *InviteService) CreateInvite(ctx context.Context, input InviteUserReques
 			return err
 		}
 
+		// An expired invite for this email no longer blocks a new one.
+		if err := s.repo.CloseExpiredOpenInvites(ctx, querier, input.OrgID, input.Email); err != nil {
+			return err
+		}
 		pending, err := s.repo.GetPendingInviteByEmail(ctx, querier, input.Email, input.OrgID)
 		if err != nil {
 			return err
 		}
 		if pending != nil {
-			return apperr.AlreadyExists(apperr.CodeInviteAlreadyExists, "invite already exists")
+			return errInviteAlreadyExists()
 		}
-		existing, err := s.repo.GetUserByEmail(ctx, querier, input.OrgID, input.Email)
+		member, err := s.repo.OrgHasMemberWithEmail(ctx, querier, input.OrgID, input.Email)
 		if err != nil {
 			return err
 		}
-		if existing != nil {
+		if member {
 			return apperr.BadRequest(apperr.CodeEmailExists, "user with this email already exists")
 		}
 
@@ -101,13 +109,12 @@ func (s *InviteService) CreateInvite(ctx context.Context, input InviteUserReques
 				return err
 			}
 		}
-		return nil
+		return s.queueInviteEmail(ctx, querier, created, input.UserID, rawToken)
 	})
 	if err != nil {
-		return nil, appError(err)
+		return nil, inviteWriteError(err)
 	}
 
-	s.sendInviteEmail(ctx, created, input.UserID, rawToken)
 	s.log.Info("invite created", "org_id", input.OrgID, "invite_id", created.ID, "invited_by", input.UserID)
 
 	return &InviteUserResponse{
@@ -194,11 +201,11 @@ func (s *InviteService) AcceptInvite(ctx context.Context, input AcceptInviteRequ
 			return errInviteExpired()
 		}
 
-		existing, err := s.repo.GetUserByEmail(ctx, querier, invite.OrgID, invite.Email)
+		member, err := s.repo.OrgHasMemberWithEmail(ctx, querier, invite.OrgID, invite.Email)
 		if err != nil {
 			return err
 		}
-		if existing != nil {
+		if member {
 			return apperr.BadRequest(apperr.CodeEmailExists, "user with this email is already registered in this organization")
 		}
 
@@ -206,7 +213,7 @@ func (s *InviteService) AcceptInvite(ctx context.Context, input AcceptInviteRequ
 			OrgID:           invite.OrgID,
 			FirstName:       invite.FirstName,
 			LastName:        invite.LastName,
-			Email:           invite.Email,
+			Email:           normalizeEmail(invite.Email),
 			PasswordHash:    &passwordHash,
 			IsEmailVerified: true,
 		})
@@ -251,6 +258,12 @@ func (s *InviteService) ListInvites(ctx context.Context, orgID uuid.UUID, status
 // ResendInvite emails a pending or expired invite again with a new token and
 // a fresh expiry; the previous link stops working. Resending hands out the
 // invite's roles again, so the grant policy is checked again for the caller.
+//
+// Everything happens under the invite's row lock, in one transaction: the
+// cooldown check (on the database clock), the new token, last_sent_at and
+// the queued email. Concurrent resends therefore take turns, and a throttled
+// resend or a failure to queue the email changes nothing: the current link
+// keeps working and the cooldown is not consumed.
 func (s *InviteService) ResendInvite(ctx context.Context, orgID, callerID, inviteID uuid.UUID) (*InviteUserResponse, error) {
 	rawToken, err := s.newToken()
 	if err != nil {
@@ -262,6 +275,13 @@ func (s *InviteService) ResendInvite(ctx context.Context, orgID, callerID, invit
 		invite, err = s.lockManageableInvite(ctx, querier, orgID, inviteID)
 		if err != nil {
 			return err
+		}
+		wait, err := s.repo.InviteResendWait(ctx, querier, invite.ID, s.cfg.Auth.InviteResendCooldown())
+		if err != nil {
+			return err
+		}
+		if wait > 0 {
+			return errResendTooSoon(wait)
 		}
 		roleIDs, err := s.repo.GetInviteRoleIDsInOrg(ctx, querier, invite.ID, orgID)
 		if err != nil {
@@ -281,13 +301,15 @@ func (s *InviteService) ResendInvite(ctx context.Context, orgID, callerID, invit
 
 		invite.TokenHash = HashToken(rawToken)
 		invite.ExpiresAt = time.Now().Add(s.cfg.Auth.InviteTTL())
-		return s.repo.ReissueInvite(ctx, querier, invite.ID, invite.TokenHash, invite.ExpiresAt)
+		if err := s.repo.ReissueInvite(ctx, querier, invite.ID, invite.TokenHash, invite.ExpiresAt); err != nil {
+			return err
+		}
+		return s.queueInviteEmail(ctx, querier, invite, callerID, rawToken)
 	})
 	if err != nil {
-		return nil, appError(err)
+		return nil, inviteWriteError(err)
 	}
 
-	s.sendInviteEmail(ctx, invite, callerID, rawToken)
 	s.log.Info("invite resent", "org_id", orgID, "invite_id", invite.ID, "resent_by", callerID)
 	return &InviteUserResponse{Message: "Invite sent again", InviteID: invite.ID, ExpiresAt: invite.ExpiresAt}, nil
 }
@@ -336,24 +358,28 @@ func (s *InviteService) lockManageableInvite(ctx context.Context, querier Querie
 	return invite, nil
 }
 
-// sendInviteEmail queues the invite email. Failing to queue it is logged, not
-// returned: the invite exists and can be resent.
-func (s *InviteService) sendInviteEmail(ctx context.Context, invite *Invite, invitedBy uuid.UUID, rawToken string) {
+// queueInviteEmail queues the invite email through the caller's transaction,
+// so the invite (or its new token) and the email commit together: if the
+// email cannot be queued, the whole operation fails and nothing changes. The
+// link travels only inside the email, which is stored encrypted.
+func (s *InviteService) queueInviteEmail(ctx context.Context, querier Querier, invite *Invite, invitedBy uuid.UUID, rawToken string) error {
 	if s.notification == nil {
-		return
+		return nil
 	}
-	org, err := s.repo.GetOrgByID(ctx, s.repo.Query(), invite.OrgID)
-	if err != nil || org == nil {
-		s.log.Warn("invite email not sent: organization lookup failed", "org_id", invite.OrgID, "invite_id", invite.ID, "error", err)
-		return
+	org, err := s.repo.GetOrgByID(ctx, querier, invite.OrgID)
+	if err != nil {
+		return err
+	}
+	if org == nil {
+		return apperr.NotFound(apperr.CodeOrgNotFound, "organization not found")
 	}
 
 	inviteLink := buildAppLink(s.cfg.App.URL, "/invite/accept", map[string]string{"token": rawToken})
 	expires := invite.ExpiresAt.Format(time.RFC1123)
-	err = s.notification.EnqueueEmail(ctx, notification.Task{
+	err = s.notification.EnqueueEmailTx(ctx, querier, notification.Task{
 		OrgID:     invite.OrgID,
 		UserID:    &invitedBy,
-		EventType: "invite_created",
+		EventType: notification.EventInviteCreated,
 		Recipient: invite.Email,
 		Subject:   fmt.Sprintf("You're invited to %s on APM Master", org.Name),
 		Body:      fmt.Sprintf("Hi %s,\n\nYou have been invited to join %s on APM Master.\n\nAccept your invite here:\n%s\n\nThis invite expires on %s.", invite.FirstName, org.Name, inviteLink, expires),
@@ -367,8 +393,39 @@ func (s *InviteService) sendInviteEmail(ctx context.Context, invite *Invite, inv
 		},
 	})
 	if err != nil {
-		s.log.Warn("invite email enqueue failed", "org_id", invite.OrgID, "invite_id", invite.ID, "error", err)
+		return fmt.Errorf("queue invite email: %w", err)
 	}
+	return nil
+}
+
+// normalizeEmail is the canonical form of an email address for comparison
+// and storage: surrounding space removed, lowercased.
+func normalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
+func errInviteAlreadyExists() *apperr.Error {
+	return apperr.AlreadyExists(apperr.CodeInviteAlreadyExists, "invite already exists")
+}
+
+// errResendTooSoon is the 429 for a resend inside the cooldown. The data
+// tells the client when to retry; the UI shows the reason.
+func errResendTooSoon(waitSeconds int) *apperr.Error {
+	return apperr.RateLimited().WithData(map[string]any{
+		"retry_after_seconds": waitSeconds,
+		"reason":              fmt.Sprintf("this invite was sent recently; try again in %d seconds", waitSeconds),
+	})
+}
+
+// inviteWriteError maps a failed invite transaction to an API error. Two
+// concurrent invites for one email can both pass the pending check; the
+// loser hits the one-open-invite-per-email index, which is the same conflict.
+func inviteWriteError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == sqlStateUniqueViolation && pgErr.ConstraintName == "invites_one_open_per_email" {
+		return errInviteAlreadyExists()
+	}
+	return appError(err)
 }
 
 // inviteUnusable is the client error for an invite that cannot be looked up

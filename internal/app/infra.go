@@ -15,6 +15,7 @@ import (
 	"github.com/Maitrimodii/apm_master/internal/metrics"
 	"github.com/Maitrimodii/apm_master/internal/notification"
 	"github.com/Maitrimodii/apm_master/internal/platform/pg"
+	"github.com/Maitrimodii/apm_master/internal/platform/secretbox"
 	"github.com/Maitrimodii/apm_master/internal/retention"
 	"github.com/Maitrimodii/apm_master/internal/scheduler"
 	"github.com/Maitrimodii/apm_master/internal/traces"
@@ -47,12 +48,19 @@ func connectPostgres(ctx context.Context, cfg *config.Config, log *slog.Logger) 
 }
 
 // newNotificationService builds the notification queue with SMTP delivery.
-func newNotificationService(pool *pgxpool.Pool, cfg config.SMTPConfig, log *slog.Logger) *notification.Service {
-	store := notification.NewStore(pool)
+// Its keyring encrypts and decrypts the payload of sensitive emails; the
+// configuration was validated at startup, so a parse error here is a bug.
+func newNotificationService(pool *pgxpool.Pool, cfg *config.Config, log *slog.Logger) (*notification.Service, error) {
+	keys, err := secretbox.ParseKeyring(cfg.Notify.EncryptionKeys, cfg.Notify.EncryptionKeyID)
+	if err != nil {
+		return nil, fmt.Errorf("notification encryption keys: %w", err)
+	}
+	store := notification.NewStore(pool, keys)
 	smtp := notification.NewSMTPProvider(notification.SMTPConfig{
-		Host: cfg.Host, Port: cfg.Port, Username: cfg.Username, Password: cfg.Password, From: cfg.From,
+		Host: cfg.SMTP.Host, Port: cfg.SMTP.Port, Username: cfg.SMTP.Username, Password: cfg.SMTP.Password, From: cfg.SMTP.From,
+		AllowInsecure: cfg.SMTP.AllowInsecure,
 	})
-	return notification.NewService(store, notification.NewWorker(store, []notification.Provider{smtp}, log, 0), log)
+	return notification.NewService(store, notification.NewWorker(store, []notification.Provider{smtp}, log, 0), log), nil
 }
 
 // lockFunc binds a cluster-wide advisory lock key for a singleton task.
@@ -82,7 +90,11 @@ func newScheduler(pool *pgxpool.Pool, cfg *config.Config, notifier alert.Notifie
 		lockFunc(pool, pg.LockRetention),
 		log,
 	)
-	for _, task := range []scheduler.Task{evaluation, cleanup} {
+	// Erasing expired dead-letter ciphertext needs no keys.
+	jobs := notification.NewStore(pool, nil)
+	purge := notification.NewPayloadPurgeTask(jobs, cfg.Notify.DeadLetterRecovery(), log)
+	recovery := notification.NewStaleJobRecoveryTask(jobs, cfg.Notify.StaleProcessing(), log)
+	for _, task := range []scheduler.Task{evaluation, cleanup, purge, recovery} {
 		if err := s.Register(task); err != nil {
 			return nil, fmt.Errorf("register %s task: %w", task.Name(), err)
 		}

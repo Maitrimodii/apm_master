@@ -81,6 +81,20 @@ func (r *Repository) GetUserByEmail(ctx context.Context, querier Querier, orgID 
 	return &user, nil
 }
 
+// OrgHasMemberWithEmail reports whether a user of the org has this email,
+// ignoring case and surrounding space: "Bob@x.com" is the same member as
+// "bob@x.com".
+func (r *Repository) OrgHasMemberWithEmail(ctx context.Context, querier Querier, orgID uuid.UUID, email string) (bool, error) {
+	var exists bool
+	err := querier.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM users WHERE org_id = $1 AND lower(btrim(email)) = lower(btrim($2)))`,
+		orgID, email).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check org member email: %w", err)
+	}
+	return exists, nil
+}
+
 func (r *Repository) GetUserByID(ctx context.Context, querier Querier, userID uuid.UUID) (*User, error) {
 	query := `SELECT id, org_id, is_email_verified, first_name, last_name, email, password_hash, created_at, updated_at FROM users WHERE id = $1`
 	var user User

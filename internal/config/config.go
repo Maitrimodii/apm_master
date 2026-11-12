@@ -39,6 +39,7 @@ type Config struct {
 	Redis     RedisConfig
 	Auth      AuthConfig
 	SMTP      SMTPConfig
+	Notify    NotificationConfig
 	Kafka     KafkaConfig
 	Alerting  AlertingConfig
 	Retention RetentionConfig
@@ -89,6 +90,11 @@ type HTTPConfig struct {
 	// and per organization.
 	RateLimitBurst  int           `env:"RATE_LIMIT_BURST" envDefault:"200"`
 	RateLimitWindow time.Duration `env:"RATE_LIMIT_WINDOW_MS" envDefault:"1000"`
+	// TrustedProxies are the addresses (IPs or CIDRs) of reverse proxies in
+	// front of the API. Only requests arriving from them may set the client
+	// IP through X-Forwarded-For / X-Real-IP; everyone else's headers are
+	// ignored. Empty (the default) trusts no proxy.
+	TrustedProxies []string `env:"TRUSTED_PROXIES" envSeparator:","`
 }
 
 type PostgresConfig struct {
@@ -115,7 +121,9 @@ func (c PostgresConfig) dsn(scheme string) string {
 }
 
 type RedisConfig struct {
-	// URL is redis://… or a bare host:port.
+	// URL is redis://… or a bare host:port. Outside development it must carry
+	// a password (redis://:<password>@host:6379/0): Redis holds the API-key
+	// cache, so unauthenticated access could map a key to any organization.
 	URL     string        `env:"REDIS_URL" envDefault:"localhost:6379"`
 	Timeout time.Duration `env:"REDIS_TIMEOUT_MS" envDefault:"5000"`
 }
@@ -124,6 +132,8 @@ type RedisConfig struct {
 // lifetime of a login session: refresh-token rotation never extends a session
 // past it. PasswordResetCooldownSecs is how long after one reset link another
 // request for the same account is ignored (0 disables the cooldown).
+// InviteResendCooldownSecs is the minimum time between two emails for one
+// invite; a resend inside it gets 429 (0 disables the cooldown).
 type AuthConfig struct {
 	JWTSecret                 string `env:"JWT_SECRET"`
 	AccessTokenExpiryMins     int    `env:"ACCESS_TOKEN_EXPIRY_MINS" envDefault:"15"`
@@ -132,6 +142,7 @@ type AuthConfig struct {
 	InviteExpiryDays          int    `env:"INVITE_EXPIRY_DAYS" envDefault:"10"`
 	PasswordResetExpiryMins   int    `env:"PASSWORD_RESET_EXPIRY_MINS" envDefault:"30"`
 	PasswordResetCooldownSecs int    `env:"PASSWORD_RESET_COOLDOWN_SECS" envDefault:"60"`
+	InviteResendCooldownSecs  int    `env:"INVITE_RESEND_COOLDOWN_SECS" envDefault:"60"`
 }
 
 func (c AuthConfig) AccessTokenTTL() time.Duration {
@@ -149,16 +160,29 @@ func (c AuthConfig) InviteTTL() time.Duration {
 func (c AuthConfig) PasswordResetTTL() time.Duration {
 	return time.Duration(c.PasswordResetExpiryMins) * time.Minute
 }
+
+// InviteResendCooldown is the minimum time between two emails for one invite
+// (0 disables it).
+func (c AuthConfig) InviteResendCooldown() time.Duration {
+	return time.Duration(c.InviteResendCooldownSecs) * time.Second
+}
 func (c AuthConfig) PasswordResetCooldown() time.Duration {
 	return time.Duration(c.PasswordResetCooldownSecs) * time.Second
 }
 
+// SMTPConfig is outgoing mail. STARTTLS is required: mail is never sent in
+// plaintext unless AllowInsecure, which only development accepts (for a local
+// mail catcher). Outside development the server must authenticate us
+// (Username/Password) or be declared a TrustedRelay that accepts mail from
+// this network without credentials.
 type SMTPConfig struct {
-	From     string `env:"EMAIL_FROM" envDefault:"no-reply@apm-master.local"`
-	Host     string `env:"SMTP_HOST"`
-	Port     string `env:"SMTP_PORT" envDefault:"587"`
-	Username string `env:"SMTP_USERNAME"`
-	Password string `env:"SMTP_PASSWORD"`
+	From          string `env:"EMAIL_FROM" envDefault:"no-reply@apm-master.local"`
+	Host          string `env:"SMTP_HOST"`
+	Port          string `env:"SMTP_PORT" envDefault:"587"`
+	Username      string `env:"SMTP_USERNAME"`
+	Password      string `env:"SMTP_PASSWORD"`
+	AllowInsecure bool   `env:"SMTP_ALLOW_INSECURE" envDefault:"false"`
+	TrustedRelay  bool   `env:"SMTP_TRUSTED_RELAY" envDefault:"false"`
 }
 
 type KafkaConfig struct {
@@ -197,6 +221,34 @@ type KafkaConfig struct {
 
 type AlertingConfig struct {
 	EvaluationInterval time.Duration `env:"ALERT_EVALUATION_INTERVAL_MS" envDefault:"60000"`
+}
+
+// NotificationConfig protects queued emails that carry one-time links
+// (invites, password resets): their payload is encrypted with these keys and
+// never stored in plaintext.
+//
+// EncryptionKeys is "id:base64key,..." with 32-byte keys (generate one with
+// `openssl rand -base64 32`); EncryptionKeyID selects the key that encrypts.
+// Every process that sends email (API and scheduler) needs the same keys.
+// Dead-lettered jobs keep their encrypted payload for DeadLetterRecoveryHours
+// so an operator can fix the cause and re-queue them; then it is erased.
+type NotificationConfig struct {
+	EncryptionKeys          string `env:"NOTIFICATION_ENCRYPTION_KEYS"`
+	EncryptionKeyID         string `env:"NOTIFICATION_ENCRYPTION_KEY_ID"`
+	DeadLetterRecoveryHours int    `env:"NOTIFICATION_DEAD_LETTER_RECOVERY_HOURS" envDefault:"72"`
+	// StaleProcessingMinutes is how long a job may stay 'processing' before
+	// it is assumed abandoned (its worker died) and requeued.
+	StaleProcessingMinutes int `env:"NOTIFICATION_STALE_PROCESSING_MINUTES" envDefault:"15"`
+}
+
+// StaleProcessing is the age after which a 'processing' job is requeued.
+func (c NotificationConfig) StaleProcessing() time.Duration {
+	return time.Duration(c.StaleProcessingMinutes) * time.Minute
+}
+
+// DeadLetterRecovery is how long a dead-lettered job keeps its ciphertext.
+func (c NotificationConfig) DeadLetterRecovery() time.Duration {
+	return time.Duration(c.DeadLetterRecoveryHours) * time.Hour
 }
 
 // RetentionConfig covers tables outside Timescale's own retention policies.

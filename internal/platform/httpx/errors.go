@@ -3,6 +3,7 @@ package httpx
 import (
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -34,6 +35,13 @@ func Handle(c *gin.Context, err error) {
 
 	c.Set(CtxKeyErrorType, string(apiErr.Type))
 	c.Set(CtxKeyErrorCode, string(apiErr.Code))
+
+	// A throttled request that says when to retry also gets the standard header.
+	if apiErr.Type == apperr.TypeRateLimited {
+		if wait, ok := apiErr.Data["retry_after_seconds"].(int); ok && wait > 0 {
+			c.Header("Retry-After", strconv.Itoa(wait))
+		}
+	}
 
 	c.JSON(httpStatus(apiErr.Type), Response{
 		Success: false,

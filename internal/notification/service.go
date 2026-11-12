@@ -34,7 +34,15 @@ func (s *Service) Done() <-chan struct{} {
 
 // EnqueueEmail queues a transactional email (invites, password resets).
 func (s *Service) EnqueueEmail(ctx context.Context, task Task) error {
-	return s.enqueueEmail(ctx, task, PriorityNormal)
+	return s.enqueueEmail(ctx, s.store.database, task, PriorityNormal)
+}
+
+// EnqueueEmailTx queues a transactional email through exec, typically the
+// caller's transaction: the job then exists only if that transaction commits,
+// so a failure to queue rolls back whatever the email was about (a new invite
+// token, a resend's cooldown) and a rollback leaves no orphaned email.
+func (s *Service) EnqueueEmailTx(ctx context.Context, exec Execer, task Task) error {
+	return s.enqueueEmail(ctx, exec, task, PriorityNormal)
 }
 
 // EnqueueHighPriorityEmail queues an alert email ahead of transactional mail.
@@ -50,10 +58,10 @@ func (s *Service) EnqueueHighPriorityEmail(ctx context.Context, task Task) error
 			return nil
 		}
 	}
-	return s.enqueueEmail(ctx, task, PriorityHigh)
+	return s.enqueueEmail(ctx, s.store.database, task, PriorityHigh)
 }
 
-func (s *Service) enqueueEmail(ctx context.Context, task Task, defaultPriority int) error {
+func (s *Service) enqueueEmail(ctx context.Context, exec Execer, task Task, defaultPriority int) error {
 	if task.EventType == "" || task.Recipient == "" || task.Subject == "" {
 		return errTaskIncomplete
 	}
@@ -61,7 +69,7 @@ func (s *Service) enqueueEmail(ctx context.Context, task Task, defaultPriority i
 	if task.Priority == 0 {
 		task.Priority = defaultPriority
 	}
-	if err := s.store.CreateJob(ctx, task, DefaultMaxAttempts); err != nil {
+	if err := s.store.CreateJob(ctx, exec, task, DefaultMaxAttempts); err != nil {
 		s.log.ErrorContext(ctx, "failed to create notification job", "event_type", task.EventType, "error", err)
 		return fmt.Errorf("create notification job: %w", err)
 	}

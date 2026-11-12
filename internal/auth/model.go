@@ -49,12 +49,15 @@ const (
 	InviteStatusExpired  InviteStatus = "expired"
 )
 
-// Status derives the invite's status. Accepted and revoked win over expired:
-// they are final, while expiry is only time passing.
+// Status derives the invite's status. Accepted wins over everything: it is
+// final. An invite closed after it had already expired (to make room for a
+// new invite, or cancelled late) is expired; closed before expiry, revoked.
 func (i Invite) Status(now time.Time) InviteStatus {
 	switch {
 	case i.AcceptedAt != nil:
 		return InviteStatusAccepted
+	case i.RevokedAt != nil && !i.ExpiresAt.After(*i.RevokedAt):
+		return InviteStatusExpired
 	case i.RevokedAt != nil:
 		return InviteStatusRevoked
 	case !i.ExpiresAt.After(now):

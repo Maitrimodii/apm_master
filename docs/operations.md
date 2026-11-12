@@ -177,6 +177,109 @@ To replay an AI job from the DLQ, produce its payload to
 safe. A user can also press **Retry** on the investigation, which calls
 `POST /investigations/:id/retry`.
 
+## Notification encryption keys
+
+Invite and password-reset emails carry one-time links. Their body and metadata
+are stored only encrypted (AES-256-GCM, a fresh random nonce per job, bound to
+the job's ID, org, event type and recipient) in
+`notification_jobs.payload_ciphertext`; the readable columns hold placeholders
+and `notification_events` never records the link. CHECK constraints from
+migration 000015 reject any row that would store such a link in plaintext.
+
+**Generate and configure.** Each environment gets its own key; never commit one.
+
+```bash
+openssl rand -base64 32          # one key
+NOTIFICATION_ENCRYPTION_KEYS=k2026a:<key>
+NOTIFICATION_ENCRYPTION_KEY_ID=k2026a
+```
+
+Both the API and the scheduler process send email and need identical values.
+Both refuse to start when the keys are missing or malformed.
+
+**Rotate.** Every listed key decrypts; only the active one encrypts.
+
+1. Add the new key and keep the old: `NOTIFICATION_ENCRYPTION_KEYS=k2026a:<old>,k2026b:<new>`.
+2. Set `NOTIFICATION_ENCRYPTION_KEY_ID=k2026b` and restart the API and scheduler.
+3. Wait until no job needs the old key:
+   `SELECT count(*) FROM notification_jobs WHERE payload_key_id = 'k2026a';`
+   (sent jobs erase their ciphertext at once; dead-lettered ones after the
+   recovery window).
+4. Remove the old key from the list and restart. A job still sealed with a
+   removed key is dead-lettered, never sent in plaintext.
+
+**Recover a dead-lettered job.** A job is dead-lettered when delivery fails
+`max_attempts` times, or at once when its payload cannot be decrypted (unknown
+key, tampering). Its ciphertext is kept for
+`NOTIFICATION_DEAD_LETTER_RECOVERY_HOURS` (default 72), then erased by the
+`notification_payload_purge` task. Within that window, fix the cause (restore
+the key, fix SMTP) and re-queue:
+
+```sql
+UPDATE notification_jobs
+SET state = 'pending', attempts = 0, run_at = now(), last_error = NULL
+WHERE id = '<job id>' AND state = 'dead_letter' AND payload_ciphertext IS NOT NULL;
+```
+
+The link inside may have expired by then (password resets last 30 minutes);
+the user can then simply request a new one.
+
+**Backups.** Backups taken before migration 000015 may contain plaintext links
+in `notification_jobs` and `notification_events`. Those links expire (resets
+after 30 minutes, invites after `INVITE_EXPIRY_DAYS`), but restrict access to
+such backups and delete them once their retention period ends. Restoring a
+TimescaleDB dump needs `timescaledb_pre_restore()` / `timescaledb_post_restore()`.
+
+**Jobs stuck in `processing`.** A worker that dies mid-send leaves its job in
+`processing`. The `notification_stale_job_recovery` task (every 5 minutes)
+returns jobs older than `NOTIFICATION_STALE_PROCESSING_MINUTES` (default 15,
+minimum 2; a send is capped at 30 seconds) to `pending`, or to `dead_letter`
+when their attempts are used up. Their ciphertext is kept. Delivery is
+at-least-once: a crash after the SMTP server accepted a message but before it
+was recorded as sent means the email goes out twice.
+
+## Docker workflows
+
+Both workflows share the dependencies started by `make deps-up` (Postgres,
+Redis, Kafka, Mailpit) on the `apm-net` network, and the application settings
+in `apm_master/.env` (JWT secret, encryption keys, ...). Only the addresses
+differ:
+
+| From | Postgres | Redis | Kafka | SMTP (Mailpit) |
+|---|---|---|---|---|
+| host (`make run`) | `localhost:5433` | `localhost:6379` | `localhost:9092` | `localhost:1025` |
+| container on `apm-net` | `postgres:5432` | `redis:6379` | `apm-kafka:29092` | `mailpit:1025` |
+
+Kafka advertises a listener per audience (`INTERNAL://apm-kafka:29092`,
+`EXTERNAL://localhost:9092`): a client is told to reconnect to the advertised
+address of the listener it reached, so each side gets one it can resolve.
+
+* **Host:** `.env` uses the `localhost` addresses. For Mailpit set
+  `SMTP_HOST=localhost`, `SMTP_PORT=1025`, `SMTP_ALLOW_INSECURE=true`
+  (development only). Mail UI: http://localhost:8025.
+* **Containers:** `docker compose -f deploy/docker/docker-compose.yml up -d --build apm-api apm-scheduler`.
+  The compose file overrides the addresses above (and `HTTP_PORT=8080`). Mail
+  goes to `mailpit:1025` by default; point `DOCKER_SMTP_HOST` / `DOCKER_SMTP_PORT`
+  elsewhere for a real relay. If Redis has a password, set
+  `DOCKER_REDIS_URL=redis://:<password>@redis:6379/0`.
+* **AI service with apm_master** (after the stack above is up):
+  `docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.apm.yml up -d api worker`
+  in `apm-ai-service`. The overlay joins `apm-net` and uses `apm-kafka:29092`
+  and `http://apm-api:8080`; its `APM_BACKEND_SERVICE_TOKEN` must equal
+  apm_master's `AI_SERVICE_TOKEN`.
+
+## Network exposure
+
+| Component | In this repository | Production expectation |
+|---|---|---|
+| API | plain HTTP on 8080; compose binds the host port to `BIND_ADDR` (loopback) | TLS terminated by a proxy or load balancer; set `TRUSTED_PROXIES` to its addresses |
+| Client IP | `X-Forwarded-For` / `X-Real-IP` honoured only from `TRUSTED_PROXIES` | list exactly your proxies |
+| Redis | password optional in development (`REDIS_PASSWORD`) | password required (API refuses to start without one), private network only |
+| Kafka | PLAINTEXT, no authentication, loopback-bound | private network; SASL/TLS is not configured by this repository |
+| Postgres | password auth, loopback-bound | private network; TLS per your provider |
+| SMTP | STARTTLS required; `SMTP_ALLOW_INSECURE` only in development | credentials or `SMTP_TRUSTED_RELAY=true` |
+| UI (nginx) | HTTP on 80; security headers from `deploy/security-headers.conf` (mount at `/etc/nginx/snippets/apm-security-headers.conf`); query strings never logged | terminate TLS in front and add HSTS there |
+
 ## Troubleshooting
 
 | Symptom | Look at |

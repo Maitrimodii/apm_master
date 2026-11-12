@@ -23,7 +23,10 @@ func RunScheduler(ctx context.Context, cfg *config.Config, log *slog.Logger) err
 	appCtx, appCancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer appCancel()
 
-	notifications := newNotificationService(pool, cfg.SMTP, log)
+	notifications, err := newNotificationService(pool, cfg, log)
+	if err != nil {
+		return err
+	}
 	notifications.Start(appCtx)
 
 	jobs, err := newScheduler(pool, cfg, notifications, log)

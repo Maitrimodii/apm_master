@@ -95,7 +95,7 @@ func TestDurableQueueJobProcessing(testRunner *testing.T) {
 		testRunner.Fatalf("failed to insert user: %v", err)
 	}
 
-	store := NewStore(pool)
+	store := NewStore(pool, testKeyring(testRunner))
 	mProvider := &mockProvider{name: "email"}
 	worker := NewWorker(store, []Provider{mProvider}, nil, 2)
 
@@ -110,7 +110,7 @@ func TestDurableQueueJobProcessing(testRunner *testing.T) {
 	}
 
 	// 2. Enqueue the task
-	err = store.CreateJob(ctx, task, 3)
+	err = store.CreateJob(ctx, pool, task, 3)
 	if err != nil {
 		testRunner.Fatalf("failed to create job: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestDurableQueueRetriesAndDeadLetter(testRunner *testing.T) {
 		testRunner.Fatalf("failed to insert user: %v", err)
 	}
 
-	store := NewStore(pool)
+	store := NewStore(pool, testKeyring(testRunner))
 	mProvider := &mockProvider{name: "email", err: errors.New("network outage")}
 	worker := NewWorker(store, []Provider{mProvider}, nil, 1)
 
@@ -195,7 +195,7 @@ func TestDurableQueueRetriesAndDeadLetter(testRunner *testing.T) {
 	}
 
 	// 1. Create a job with 3 max attempts
-	err = store.CreateJob(ctx, task, 3)
+	err = store.CreateJob(ctx, pool, task, 3)
 	if err != nil {
 		testRunner.Fatalf("failed to create job: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestDurableQueueIdempotence(testRunner *testing.T) {
 		testRunner.Fatalf("failed to insert user: %v", err)
 	}
 
-	store := NewStore(pool)
+	store := NewStore(pool, testKeyring(testRunner))
 	service := NewService(store, NewWorker(store, nil, nil, 1), nil)
 	refID := "unique-alert-ref-" + uuid.NewString()
 	task := Task{
@@ -339,7 +339,7 @@ func TestDurableQueueGracefulShutdown(testRunner *testing.T) {
 		testRunner.Fatalf("failed to insert user: %v", err)
 	}
 
-	store := NewStore(pool)
+	store := NewStore(pool, testKeyring(testRunner))
 	jobFinishedChan := make(chan struct{})
 	mProvider := &mockProvider{
 		name: "email",
@@ -361,7 +361,7 @@ func TestDurableQueueGracefulShutdown(testRunner *testing.T) {
 		Body:      "Test Body",
 	}
 
-	err = store.CreateJob(ctx, task, 3)
+	err = store.CreateJob(ctx, pool, task, 3)
 	if err != nil {
 		testRunner.Fatalf("failed to create job: %v", err)
 	}
@@ -418,7 +418,7 @@ func TestDurableQueuePriorityProcessing(testRunner *testing.T) {
 		testRunner.Fatalf("failed to insert user: %v", err)
 	}
 
-	store := NewStore(pool)
+	store := NewStore(pool, testKeyring(testRunner))
 	mProvider := &mockProvider{name: "email"}
 	worker := NewWorker(store, []Provider{mProvider}, nil, 1)
 
@@ -447,14 +447,14 @@ func TestDurableQueuePriorityProcessing(testRunner *testing.T) {
 	}
 
 	// Enqueue normal priority job first, then high priority job
-	err = store.CreateJob(ctx, task1, 3)
+	err = store.CreateJob(ctx, pool, task1, 3)
 	if err != nil {
 		testRunner.Fatalf("failed to create job 1: %v", err)
 	}
 
 	time.Sleep(50 * time.Millisecond)
 
-	err = store.CreateJob(ctx, task2, 3)
+	err = store.CreateJob(ctx, pool, task2, 3)
 	if err != nil {
 		testRunner.Fatalf("failed to create job 2: %v", err)
 	}

@@ -158,12 +158,26 @@ func (w *Worker) processNextJob(ctx context.Context) (bool, error) {
 		return true, nil
 	}
 
+	body, meta := job.Body, job.Metadata
+	if IsSensitive(job.EventType) {
+		payload, err := w.store.OpenPayload(job)
+		if err != nil {
+			// Never fall back to the plaintext columns. A missing key or a
+			// failed authentication will not fix itself on retry, so the job is
+			// dead-lettered now, keeping its ciphertext for the recovery window.
+			w.log.ErrorContext(processCtx, "notification payload cannot be decrypted", "job_id", job.ID, "error", err)
+			w.deadLetter(processCtx, job, err)
+			return true, nil
+		}
+		body, meta = payload.Body, payload.Metadata
+	}
+
 	msg := Message{
 		To:        job.Recipient,
 		Subject:   job.Subject,
-		Body:      job.Body,
+		Body:      body,
 		EventType: job.EventType,
-		Meta:      job.Metadata,
+		Meta:      meta,
 	}
 
 	if err := provider.Send(processCtx, msg); err != nil {
@@ -173,7 +187,7 @@ func (w *Worker) processNextJob(ctx context.Context) (bool, error) {
 	}
 
 	// Success! Update state to sent and record result
-	if err := w.store.UpdateJobState(processCtx, job.ID, JobSent, "", job.Attempts, nil); err != nil {
+	if err := w.store.MarkSent(processCtx, job.ID, job.Attempts); err != nil {
 		w.log.ErrorContext(processCtx, "failed to update job state to sent", "job_id", job.ID, "error", err)
 	}
 	w.recordResult(processCtx, task, StatusSent, nil)
@@ -194,14 +208,26 @@ func (w *Worker) handleFailure(ctx context.Context, job *Job, sendErr error) {
 		if err := w.store.UpdateJobState(ctx, job.ID, JobPending, sendErr.Error(), job.Attempts, &runAt); err != nil {
 			w.log.ErrorContext(ctx, "failed to schedule retry", "job_id", job.ID, "error", err)
 		}
-	} else {
-		w.log.WarnContext(ctx, "job exceeded max attempts, moving to dead_letter", "job_id", job.ID, "attempts", job.Attempts, "reason", sendErr.Error())
-		if err := w.store.UpdateJobState(ctx, job.ID, JobDeadLetter, sendErr.Error(), job.Attempts, nil); err != nil {
-			w.log.ErrorContext(ctx, "failed to move job to dead_letter", "job_id", job.ID, "error", err)
-		}
+		w.recordResult(ctx, jobTask(job), StatusFailed, sendErr)
+		return
 	}
+	w.log.WarnContext(ctx, "job exceeded max attempts, moving to dead_letter", "job_id", job.ID, "attempts", job.Attempts, "reason", sendErr.Error())
+	w.deadLetter(ctx, job, sendErr)
+}
 
-	task := Task{
+// deadLetter parks a job. Its encrypted payload, if any, is kept until
+// Store.PurgeDeadLetterPayloads erases it after the recovery window.
+func (w *Worker) deadLetter(ctx context.Context, job *Job, cause error) {
+	if err := w.store.UpdateJobState(ctx, job.ID, JobDeadLetter, cause.Error(), job.Attempts, nil); err != nil {
+		w.log.ErrorContext(ctx, "failed to move job to dead_letter", "job_id", job.ID, "error", err)
+	}
+	w.recordResult(ctx, jobTask(job), StatusFailed, cause)
+}
+
+// jobTask is the job as recorded in notification_events: for a sensitive job
+// Body and Metadata are already placeholders, and CreateEvent redacts again.
+func jobTask(job *Job) Task {
+	return Task{
 		OrgID:       job.OrgID,
 		UserID:      job.UserID,
 		EventType:   job.EventType,
@@ -212,7 +238,7 @@ func (w *Worker) handleFailure(ctx context.Context, job *Job, sendErr error) {
 		ReferenceID: job.ReferenceID,
 		Metadata:    job.Metadata,
 	}
-	w.recordResult(ctx, task, StatusFailed, sendErr)
+
 }
 
 func (w *Worker) recordResult(ctx context.Context, task Task, status Status, sendErr error) {

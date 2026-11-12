@@ -92,7 +92,7 @@ func (r *Repository) GetPendingInviteByEmail(
 	orgID uuid.UUID,
 ) (*Invite, error) {
 	query := `SELECT ` + inviteColumns + ` FROM invites
-		WHERE org_id = $1 AND email = $2
+		WHERE org_id = $1 AND lower(email) = lower($2)
 		  AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > now()
 		LIMIT 1`
 	invite, err := scanInvite(querier.QueryRow(ctx, query, orgID, email))
@@ -146,16 +146,47 @@ func (r *Repository) LockInvite(ctx context.Context, querier Querier, orgID, inv
 	return invite, nil
 }
 
-// ReissueInvite gives an invite a new token and expiry, so the previous link
-// stops working.
+// CloseExpiredOpenInvites closes the org's expired, never-closed invites for
+// email, so they stop occupying the one-open-invite-per-email slot (see
+// migration 000016) and a fresh invite can be created. Because they are closed
+// after expiry, they still display as expired.
+func (r *Repository) CloseExpiredOpenInvites(ctx context.Context, querier Querier, orgID uuid.UUID, email string) error {
+	_, err := querier.Exec(ctx, `
+		UPDATE invites SET revoked_at = now()
+		WHERE org_id = $1 AND lower(email) = lower($2)
+		  AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at <= now()`, orgID, email)
+	if err != nil {
+		return fmt.Errorf("close expired invites: %w", err)
+	}
+	return nil
+}
+
+// ReissueInvite gives an invite a new token and expiry and records that it
+// was just sent. The previous link stops working. An expired invite that was
+// closed (see CloseExpiredOpenInvites) is reopened.
 func (r *Repository) ReissueInvite(ctx context.Context, querier Querier, inviteID uuid.UUID, tokenHash string, expiresAt time.Time) error {
-	_, err := querier.Exec(ctx,
-		`UPDATE invites SET token_hash = $2, expires_at = $3 WHERE id = $1`,
+	_, err := querier.Exec(ctx, `
+		UPDATE invites
+		SET token_hash = $2, expires_at = $3, revoked_at = NULL, last_sent_at = now()
+		WHERE id = $1`,
 		inviteID, tokenHash, expiresAt)
 	if err != nil {
 		return fmt.Errorf("reissue invite: %w", err)
 	}
 	return nil
+}
+
+// InviteResendWait reports how many whole seconds remain before an invite may
+// be sent again, by the database clock; 0 means it may be sent now.
+func (r *Repository) InviteResendWait(ctx context.Context, querier Querier, inviteID uuid.UUID, cooldown time.Duration) (int, error) {
+	var wait int
+	err := querier.QueryRow(ctx, `
+		SELECT GREATEST(0, ceil(extract(epoch FROM (last_sent_at + make_interval(secs => $2)) - now())))::int
+		FROM invites WHERE id = $1`, inviteID, cooldown.Seconds()).Scan(&wait)
+	if err != nil {
+		return 0, fmt.Errorf("check invite resend cooldown: %w", err)
+	}
+	return wait, nil
 }
 
 // RevokeInvite cancels an invite so its link stops working.
@@ -179,13 +210,15 @@ type InviteListItem struct {
 // ListInvites returns an org's invites, newest first, optionally only those
 // in one status, with the total matching count.
 func (r *Repository) ListInvites(ctx context.Context, querier Querier, orgID uuid.UUID, status InviteStatus, limit, offset int) ([]InviteListItem, int, error) {
-	// status_of mirrors InviteStatus; the order of the checks matters (an
-	// accepted invite is accepted even after its expiry).
+	// The CASE mirrors Invite.Status; the order of the checks matters (an
+	// accepted invite is accepted even after its expiry, and an invite closed
+	// after it had expired is expired, not cancelled).
 	const base = `
 		WITH listed AS (
 			SELECT i.*, u.first_name || ' ' || u.last_name AS invited_by_name,
 			       CASE
 			           WHEN i.accepted_at IS NOT NULL THEN 'accepted'
+			           WHEN i.revoked_at IS NOT NULL AND i.expires_at <= i.revoked_at THEN 'expired'
 			           WHEN i.revoked_at IS NOT NULL THEN 'revoked'
 			           WHEN i.expires_at <= now() THEN 'expired'
 			           ELSE 'pending'

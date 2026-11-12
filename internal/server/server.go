@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -25,8 +27,16 @@ type Server struct {
 }
 
 // NewServer initializes the Gin router, registers middleware, mounts health probes and API modules.
-func NewServer(params ServerParams) *Server {
+func NewServer(params ServerParams) (*Server, error) {
 	router := gin.New()
+
+	// The client IP (used by rate limiting, request logs and session records)
+	// comes from X-Forwarded-For / X-Real-IP only when the request arrives
+	// from a configured proxy; otherwise it is the TCP peer address, so
+	// clients cannot spoof it. No proxies are trusted by default.
+	if err := router.SetTrustedProxies(trustedProxies(params.HTTP.TrustedProxies)); err != nil {
+		return nil, fmt.Errorf("configure trusted proxies: %w", err)
+	}
 
 	for _, mw := range params.Middlewares {
 		router.Use(mw)
@@ -59,7 +69,18 @@ func NewServer(params ServerParams) *Server {
 			IdleTimeout:       params.HTTP.IdleTimeout,
 			ReadHeaderTimeout: params.HTTP.HeaderTimeout,
 		},
+	}, nil
+}
+
+// trustedProxies returns the configured proxies, or nil to trust none.
+func trustedProxies(configured []string) []string {
+	var proxies []string
+	for _, p := range configured {
+		if p = strings.TrimSpace(p); p != "" {
+			proxies = append(proxies, p)
+		}
 	}
+	return proxies
 }
 
 func (s *Server) Start() error {

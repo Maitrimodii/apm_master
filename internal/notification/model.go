@@ -106,4 +106,8 @@ type Job struct {
 	Priority    int
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	// PayloadCiphertext and PayloadKeyID hold a sensitive job's real body and
+	// metadata, encrypted; Body and Metadata are then placeholders.
+	PayloadCiphertext []byte
+	PayloadKeyID      *string
 }

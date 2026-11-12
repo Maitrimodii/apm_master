@@ -62,7 +62,10 @@ func RunAPI(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	appCtx, appCancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer appCancel()
 
-	notifications := newNotificationService(pool, cfg.SMTP, log)
+	notifications, err := newNotificationService(pool, cfg, log)
+	if err != nil {
+		return err
+	}
 	notifications.Start(appCtx)
 
 	limiter := middleware.NewRateLimiter(rdb, cfg.HTTP.RateLimitBurst, cfg.HTTP.RateLimitWindow, log)
@@ -81,7 +84,7 @@ func RunAPI(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	}
 
 	incidents := alert.NewStore(pool)
-	srv := server.NewServer(server.ServerParams{
+	srv, err := server.NewServer(server.ServerParams{
 		HTTP: cfg.HTTP,
 		Middlewares: []gin.HandlerFunc{
 			middleware.CORS(cfg.App.Origins()),
@@ -109,6 +112,9 @@ func RunAPI(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		),
 		HealthChecker: server.NewHealthChecker(pool, rdb),
 	})
+	if err != nil {
+		return err
+	}
 
 	outbox, outboxWriter, err := newOutbox(appCtx, cfg, investigation.NewStore(pool), log)
 	if err != nil {

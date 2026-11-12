@@ -771,7 +771,7 @@ func TestAlertInstancesAPI(testRunner *testing.T) {
 }
 
 func newTestNotificationService(pool *pgxpool.Pool) *notification.Service {
-	store := notification.NewStore(pool)
+	store := notification.NewStore(pool, nil) // alert emails are not sensitive
 	return notification.NewService(store, notification.NewWorker(store, nil, nil, 1), nil)
 }
 

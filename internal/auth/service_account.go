@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -228,22 +229,19 @@ func (s *AccountService) ForgotPassword(
 			TokenHash: HashToken(rawToken),
 			ExpiresAt: time.Now().Add(s.cfg.Auth.PasswordResetTTL()),
 		})
-		return err
-	})
-	if err != nil {
-		return nil, apperr.Internal(err)
-	}
-	if skip {
-		s.log.Info("password reset request throttled or user gone", "org_id", org.ID, "user_id", user.ID)
-		return response, nil
-	}
-
-	if s.notification != nil {
+		if err != nil {
+			return err
+		}
+		// Queued in the same transaction: no email means no new token (and the
+		// previous link stays valid), and the email never outlives a rollback.
+		if s.notification == nil {
+			return nil
+		}
 		resetLink := buildAppLink(s.cfg.App.URL, "/reset-password", map[string]string{"token": rawToken})
-		err = s.notification.EnqueueEmail(ctx, notification.Task{
+		err = s.notification.EnqueueEmailTx(ctx, querier, notification.Task{
 			OrgID:     org.ID,
 			UserID:    &user.ID,
-			EventType: "password_reset_requested",
+			EventType: notification.EventPasswordResetRequested,
 			Recipient: user.Email,
 			Subject:   "Reset your APM Master password",
 			Body:      fmt.Sprintf("Hi %s,\n\nUse this link to reset your password:\n%s\n\nThis link expires in %d minutes.", user.FirstName, resetLink, s.cfg.Auth.PasswordResetExpiryMins),
@@ -255,13 +253,30 @@ func (s *AccountService) ForgotPassword(
 			},
 		})
 		if err != nil {
-			s.log.Warn("password reset email enqueue failed", "org_id", org.ID, "user_id", user.ID, "error", err)
+			return fmt.Errorf("%w: %w", errResetEmailNotQueued, err)
 		}
+		return nil
+	})
+	if errors.Is(err, errResetEmailNotQueued) {
+		// Answer as usual: an error here would reveal that the account exists.
+		s.log.Warn("password reset email could not be queued; nothing was changed", "org_id", org.ID, "user_id", user.ID, "error", err)
+		return response, nil
+	}
+	if err != nil {
+		return nil, apperr.Internal(err)
+	}
+	if skip {
+		s.log.Info("password reset request throttled or user gone", "org_id", org.ID, "user_id", user.ID)
+		return response, nil
 	}
 
 	s.log.Info("password reset requested", "org_id", org.ID, "user_id", user.ID)
 	return response, nil
 }
+
+// errResetEmailNotQueued marks a reset request whose email could not be
+// queued; the transaction rolled back, so nothing changed.
+var errResetEmailNotQueued = errors.New("password reset email not queued")
 
 func errPasswordResetTokenUnusable() *apperr.Error {
 	return apperr.BadRequest(apperr.CodeTokenExpired, "password reset token has expired")
